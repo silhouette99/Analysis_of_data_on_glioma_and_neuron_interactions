@@ -1,0 +1,194 @@
+---
+title: "survival analysis"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+```{r}
+# Load required packages
+library(Seurat)
+library(dplyr)
+library(tibble)
+library(openxlsx)
+
+
+# Define constants for maintainability
+PATHS <- list(
+  input = list(
+    wtum = "/mnt/raid61/public_data/Wang_etal_NatCommun_2025/GBM_c1/out/tumor_cluster.Rds",
+    ktum = "/mnt/raid61/public_data/Krishna_etal_Nature_2023/process_tumor_obj.Rds"
+  ),
+  output = list(
+    all_genes = '/mnt/raid62/pzz/ding/out2/all_dataset_gene.xlsx'
+  )
+)
+
+# Load and preprocess data
+load_data <- function() {
+  # Read and process tumor objects
+  wtum <- readRDS(PATHS$input$wtum) %>% JoinLayers()
+  ktum <- readRDS(PATHS$input$ktum) %>% JoinLayers()
+  
+  list(wtum = wtum, ktum = ktum)
+}
+
+tumor_data <- load_data()
+
+# Differential expression analysis 
+perform_de_analysis <- function(obj, ident1, ident2, group_by) {
+  FindMarkers(
+    obj,
+    ident.1 = ident1,
+    ident.2 = ident2,
+    group.by = group_by
+  ) %>%
+    filter(avg_log2FC > 0.5, p_val_adj < 0.05) %>%
+    rownames_to_column('gene')
+}
+
+# Run DE analysis for both datasets
+deg2 <- perform_de_analysis(tumor_data$wtum, 'Peritumor', 'Tumor', 'type2')
+deg3 <- perform_de_analysis(tumor_data$ktum, 'HFC', 'LFC', 'group')
+
+# Data integration and annotation 
+annotate_datasets <- function(deg_df, dataset_id) {
+  deg_df %>%
+    mutate(ident = paste0(dataset_id, '_gene')) %>%
+    select(gene, everything())
+}
+
+# Create combined results
+degs <- list(
+  annotate_datasets(deg2, 'Wang_etal'),
+  annotate_datasets(deg3, 'Krishna_etal')
+) %>% bind_rows()
+
+# Save combined results
+write.xlsx(degs, PATHS$output$all_genes, overwrite = TRUE)
+```
+
+```{r}
+# Load Required Packages 
+library(ggplot2)
+library(dplyr)
+library(openxlsx)
+library(purrr)
+library(tidyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(stringr)
+
+# Define Constants 
+PATHS <- list(
+  input = list(
+    protein = '/mnt/raid62/pzz/always_func/protein_class_Predicted.tsv',
+    uniprot = '/mnt/raid62/pzz/ding/out/c1/out/Uniprot_scret_ann.xlsx',
+    deg = '/mnt/raid62/pzz/ding/out2/all_dataset_gene.xlsx',
+    reference = '/mnt/raid61/public_data/Neftel_etal_Cell_2019/Cell_2019_obj_GBM.Rdata'
+  ),
+  output = list(
+    venn = '/mnt/raid62/pzz/ding/out2/venn_new_f.pdf',
+    filtered = '/mnt/raid62/pzz/ding/out2/filter_gene_anno.xlsx',
+    dotplot = '/mnt/raid62/pzz/ding/out2/Dotplot.pdf'
+  )
+)
+
+# Data Processing Functions 
+process_protein_data <- function() {
+  # Read and annotate protein data
+  spd <- read.delim(PATHS$input$protein, sep = '\t') %>%
+    mutate(Uniprot = ifelse(Uniprot == "", NA, Uniprot))
+  
+  # Add UNIPROT IDs for missing entries
+  missing_uniprot <- spd %>% filter(is.na(Uniprot))
+  
+  gene_mapping <- bitr(missing_uniprot$Ensembl,
+                       fromType = "ENSEMBL",
+                       toType = "UNIPROT",
+                       OrgDb = org.Hs.eg.db) %>%
+    distinct(ENSEMBL, .keep_all = TRUE)
+  
+  spd <- spd %>%
+    left_join(gene_mapping, by = c("Ensembl" = "ENSEMBL")) %>%
+    mutate(Uniprot = coalesce(Uniprot, UNIPROT)) %>%
+    select(-UNIPROT)
+  
+  return(spd)
+}
+
+# Process Uniprot Annotations 
+process_uniprot_annotations <- function(spd) {
+  unip <- read.xlsx(PATHS$input$uniprot) %>%
+    separate_rows(`Gene.Names.(primary)`, sep = "; ") %>%
+    distinct(`Gene.Names.(primary)`, .keep_all = TRUE) %>%
+    right_join(spd, by = c("Gene.Names.(primary)" = "Gene")) %>%
+    select(matches("Gene\\.Names|Gene\\.Ontology"))
+  
+  # Filter synaptic-related genes
+  synaptic_pattern <- "synap|Synap|Axon|axon|Tub|Microtub|microtub|cytoskele"
+  unip %>%
+    filter(
+      str_detect(`Gene.Ontology.(biological.process)`, synaptic_pattern) |
+        str_detect(`Gene.Ontology.(cellular.component)`, synaptic_pattern) |
+        str_detect(`Gene.Ontology.(molecular.function)`, synaptic_pattern)
+    )
+}
+
+# Generate Visualizations 
+generate_venn <- function(deg_data, secret_syn) {
+  gene_list <- deg_data %>%
+    split(.$ident) %>%
+    map(~ .x$gene) %>%
+    c(list(secret_protein = secret_syn$`Gene.Names.(primary)`))
+  
+  # pdf(PATHS$output$venn, paper = 'a4')
+  print(ggvenn::ggvenn(gene_list))
+  # dev.off()
+}
+
+generate_dotplot <- function(filtered_genes) {
+  load(PATHS$input$reference)
+  source('/mnt/raid62/pzz/always_func/Dotplot.R')
+  source('/mnt/raid62/pzz/always_func/color.R')
+  
+  gene_list <- setNames(as.list(filtered_genes$Gene.Names..primary.),
+                        filtered_genes$Function)
+  
+  # pdf(PATHS$output$dotplot, paper = 'a4', width = 6, height = 3)
+  print(anno_dot(subgbm, 
+                 features = gene_list,
+                 group = 'subtype',
+                 angle = 45,
+                 color = cList[[1]],
+                 range = c(0,4)))
+  # dev.off()
+}
+
+# Main Analysis Pipeline 
+# Step 1: Process core protein data
+spd <- process_protein_data()
+
+# Step 2: Process Uniprot annotations
+secret_syn <- process_uniprot_annotations(spd)
+
+# Step 3: Analyze DEG data
+deg2 <- read.xlsx(PATHS$input$deg)
+generate_venn(deg2, secret_syn)
+
+# Step 4: Filter and save significant genes
+uniprot_set <- read.delim(
+  '/mnt/raid62/pzz/always_func/uniprotkb_AND_model_organism_9606_2024_12_16.tsv',
+  sep = '\t'
+) %>%
+  filter(Entry %in% spd$Uniprot[spd$Gene %in% reduce(map(gene_list, ~ .x), intersect)])
+
+write.xlsx(uniprot_set, PATHS$output$filtered)
+
+# Step 5: Generate final visualization
+filtered_genes <- read.xlsx(PATHS$output$filtered)
+generate_dotplot(filtered_genes)
+
+```
