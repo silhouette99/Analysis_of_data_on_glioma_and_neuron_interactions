@@ -1,0 +1,420 @@
+---
+title: "Host data process"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+    theme: 
+      version: 5
+      bootswatch: pulse  
+    toc: true
+    toc_float: true
+    number_sections: false 
+    code_folding: hide
+    highlight: tango
+    df_print: paged
+header-includes:
+---
+
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+
+samples <- c('before_treated', 'control39', 'treated37')
+
+obj_list <- lapply(samples, function(x) {
+  file <-
+    glue::glue(
+      '/mnt/raid61/Rectum_SRCC/C1QL1_recurrent/process/{x}/outs/filtered_feature_bc_matrix/'
+    )
+  mtx <-
+    Read10X(file)
+  dat <- CreateSeuratObject(mtx)
+  dat@meta.data$orig.ident <- x
+  dat[['percent.hg']] <-
+    PercentageFeatureSet(dat, pattern = '^hg38')
+  dat[['percent.mm']] <-
+    PercentageFeatureSet(dat, pattern = '^mm10')
+  
+  
+  ## identify with hg and mm
+  cell_species <- dat@meta.data %>%
+    mutate(species = case_when(percent.mm > 90 ~ "mouse",
+                               percent.hg > 90 ~ "human",
+                               TRUE ~ "mixed"))
+  
+  dat@meta.data <- cell_species
+  
+  dat[['percent.mt.hg']] <-
+    PercentageFeatureSet(dat, pattern = 'hg38-MT-')
+  dat[['percent.mt.mm']] <-
+    PercentageFeatureSet(dat, pattern = 'mm10-mt-')
+  
+  dat
+})
+
+dat <- Reduce(merge, obj_list)
+
+hg <-
+  dat[grep(pattern = '^hg38', rownames(dat), value = T), dat@meta.data$species == 'human']
+
+# pv1 <- VlnPlot(
+#   hg,
+#   features = c('percent.mt.hg', 'nCount_RNA', 'nFeature_RNA'),
+#   group.by = 'orig.ident'
+# )
+# 
+# df <- table(hg@meta.data$orig.ident) %>% as.data.frame()
+# pb1 <- ggbarplot(
+#   df,
+#   x = 'Var1',
+#   y = 'Freq',
+#   fill = 'Var1',
+#   width = 0.5
+# ) + geom_text(aes(label = Freq))
+# 
+# pv1|pb1
+```
+
+
+## tumor cell processing
+
+```{r}
+hg <-
+  hg[, which(
+    hg@meta.data$percent.mt.hg < 10 &
+      hg@meta.data$nFeature_RNA > 200 & hg@meta.data$nCount_RNA < 25000
+  )]
+# pv2 <- VlnPlot(
+#   hg,
+#   features = c('percent.mt.hg', 'nCount_RNA', 'nFeature_RNA'),
+#   group.by = 'orig.ident'
+# )
+# 
+# df <- table(hg@meta.data$orig.ident) %>% as.data.frame()
+# pb2 <- ggbarplot(
+#   df,
+#   x = 'Var1',
+#   y = 'Freq',
+#   fill = 'Var1',
+#   width = 0.5
+# ) + geom_text(aes(label = Freq))
+# 
+# pv2|pb2
+hg <- NormalizeData(hg)
+hg <- FindVariableFeatures(hg, nfeatures = 3000)
+
+hg <- ScaleData(hg, features = rownames(hg))
+hg <- RunPCA(hg,features = VariableFeatures(hg),npcs = 100)
+
+ElbowPlot(hg, ndims = 70)
+DimHeatmap(hg, dims = 1:5,nfeatures = 1000, cells = 1000)
+
+hg <-
+  FindNeighbors(hg,
+                dims = 1:40,
+                verbose = F,
+                reduction = "pca")
+gc()
+hg <-
+  FindClusters(
+    hg,
+    reduction = "pca",
+    resolution = 0.2,
+    # dims.use = 1:20,
+    dims.use = 1:40,
+    print.output = F
+  ) %>% RunUMAP(reduction = "pca",
+                # dims = 1:20,
+                # dims = 1:20,
+                dims = 1:40)
+
+
+## remove batch effect
+
+library(harmony)
+
+hg <-
+  RunHarmony(
+    hg,
+    group.by.vars = 'orig.ident',
+    dims.use = 1:60,
+    plot_convergence = F,
+    max.iter.cluster = 100,
+    nclust = 100
+  )
+hg <-
+  FindNeighbors(hg, reduction = "harmony", dims = 1:30)
+#seq(0, 6, 0.1)
+hg <-
+  FindClusters(
+    hg,
+    reduction = "harmony",
+    cluster.name = 'mag_cluster_batch',
+    resolution = 0.3,
+    # resolution = 0.8,
+    dims.use = 1:30,
+    print.output = FALSE
+  )
+
+hg <-
+  RunUMAP(
+    hg,
+    reduction = "harmony",
+    dims = 1:30,
+    reduction.name = 'harmonyumap'
+  )
+
+
+## GBM subtype from Neift.Cell.2019
+
+library(openxlsx)
+
+hg <- JoinLayers(hg)
+data <-
+  read.xlsx(
+    "/mnt/raid62/heping/task/06Aging_TME/00data/download/GBM_subtype/2019NeftelCell_MetaModuleGenelist.xlsx",
+    startRow = 5
+  )
+
+for (x in colnames(data)) {
+  gs <- list(paste0('hg38-', data[, x][which(!is.na(data[, x]))]))
+  hg <- AddModuleScore(hg, features = gs, name = x)
+}
+
+score_columns <-
+  c("OPC1", "NPC11", "NPC21", "MES21", "MES11", "AC1")
+hg@meta.data[, score_columns] <-
+  sapply(hg@meta.data[, score_columns], as.numeric)
+
+
+hg@meta.data$D <-
+  apply(hg@meta.data[, score_columns], 1, function(x) {
+    max(c(x[["OPC1"]], x[['NPC11']], x[['NPC21']])) - max(c(x[['MES21']], x[['MES11']], x[['AC1']]))
+  })
+hg[["X"]] <-
+  apply(hg@meta.data[, c(score_columns, "D")], 1, function(x) {
+    if (x["D"] > 0) {
+      return(log2((max(x[["NPC11"]], x[["NPC21"]]) - x[["OPC1"]]) + 1))
+    } else {
+      return(log2((max(x[["MES21"]], x[["MES11"]]) - x[["AC1"]]) + 1))
+    }
+  })
+
+library(ggpointdensity)
+
+ggplot(hg@meta.data, aes(x = X, y = D)) +
+  geom_pointdensity(size = 0.8) +
+  scale_color_viridis_c() +
+  theme_test() +
+  labs(x = "Relative AddModuScore\nlog2(SC1-SC2+1)",
+       y = "Relative AddModuScore") +
+  geom_hline(aes(yintercept = 0), linetype = "dashed") +
+  geom_vline(aes(xintercept = 0), linetype = "dashed") +
+  annotate(
+    "text",
+    x = 0.6,
+    y = 0.4,
+    label = "NPC-like",
+    vjust = 1,
+    hjust = 1
+  ) +
+  annotate(
+    "text",
+    x = -0.6,
+    y = 0.4,
+    label = "OPC-like",
+    vjust = 1,
+    hjust = 0
+  ) +
+  annotate(
+    "text",
+    x = 0.6,
+    y = -0.6,
+    label = "MES-like",
+    vjust = 0,
+    hjust = 1
+  ) +
+  annotate(
+    "text",
+    x = -0.6,
+    y = -0.6,
+    label = "AC-like",
+    vjust = 0,
+    hjust = 0
+  )
+
+```
+
+TME cells processing
+
+```{r}
+mm <-
+  dat[grep("^mm10", rownames(dat), value = TRUE), 
+                 dat@meta.data$species == "mouse"]
+
+pvm1 <- VlnPlot(
+  hg,
+  features = c('percent.mt.mm', 'nCount_RNA', 'nFeature_RNA'),
+  group.by = 'orig.ident'
+)
+
+df <- table(mm@meta.data$orig.ident) %>% as.data.frame()
+pbm1 <- ggbarplot(
+  df,
+  x = 'Var1',
+  y = 'Freq',
+  fill = 'Var1',
+  width = 0.5
+) + geom_text(aes(label = Freq))
+
+pvm1|pbm1
+
+mm <- NormalizeData(mm)
+mm <- FindVariableFeatures(mm, nfeatures = 2000)
+mm <- ScaleData(mm, features = rownames(mm))
+mm <- RunPCA(mm,features = VariableFeatures(mm),npcs = 100)
+
+ElbowPlot(mm, ndims = 70)
+DimHeatmap(mm, dims = 1:5,nfeatures = 1000, cells = 1000)
+
+mm <-
+  FindNeighbors(mm,
+                dims = 1:50,
+                verbose = F,
+                reduction = "pca")
+mm <-
+  FindClusters(
+    mm,
+    reduction = "pca",
+    resolution = 0.6,
+    # dims.use = 1:20,
+    dims.use = 1:50,
+    print.output = F
+  ) %>% RunUMAP(reduction = "pca",
+                # dims = 1:20,
+                # dims = 1:20,
+                dims = 1:50)
+
+mm <-
+  RunHarmony(
+    mm,
+    group.by.vars = 'orig.ident',
+    dims.use = 1:60,
+    plot_convergence = F,
+    max.iter.cluster = 100,
+    nclust = 100
+  )
+mm <-
+  FindNeighbors(mm, reduction = "harmony", dims = 1:30)
+mm <-
+  FindClusters(
+    mm,
+    reduction = "harmony",
+    resolution = 0.8,
+    dims.use = 1:30,
+    print.output = FALSE
+  )
+
+# mag <-
+#   RunTSNE(
+#     mag,
+#     reduction = "harmony",
+#     dims = 1:30,
+#     reduction.name = 'harmonytsne'
+#   )
+mm <-
+  RunUMAP(
+    mm,
+    reduction = "harmony",
+    dims = 1:30
+  )
+
+mm <- JoinLayers(mm)
+
+deg <- FindAllMarkers(mm, logfc.threshold = 1, min.pct = 0.1)
+
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(1,10,17,20)),'cell_type'] <- 'Immune'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(6)),'cell_type'] <- 'AC'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(5,19)),'cell_type'] <- 'OPC'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(4)),'cell_type'] <- 'OC'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(11)),'cell_type'] <- 'Pericyte'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(18)),'cell_type'] <- 'Endothelial'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(0,2,7,14,15,13)),'cell_type'] <- 'Excited'
+mm@meta.data[which(mm@meta.data$seurat_clusters %in% c(3,22,8,21,9,16,12,21)),'cell_type'] <- 'Interneuron'
+
+mm@meta.data$cell_type <-
+  factor(
+    mm@meta.data$cell_type,
+    levels = c(
+      'AC',
+      'OPC',
+      'OC',
+      'Excited',
+      'Interneuron',
+      'Pericyte',
+      'Endothelial',
+      'Immune'
+    )
+  )
+
+run_diff_analysis <- function(
+    obj, 
+    ident1, 
+    ident2, 
+    group_by = "orig.ident", 
+    min_pct = 0.05, 
+    org_db = "org.Hs.eg.db") {
+  
+  # Perform differential expression analysis
+  markers <- Seurat::FindMarkers(
+    object = obj,
+    ident.1 = ident1,
+    ident.2 = ident2,
+    group.by = group_by,
+    min.pct = min_pct
+  )
+  
+  # Process gene names
+  markers$gene <- gsub(rownames(markers), pattern = "hg38-", replacement = "")
+  rownames(markers) <- NULL  # 移除冗余的行名
+  
+  # Gene ID conversion
+  gene_mapping <- clusterProfiler::bitr(
+    markers$gene,
+    fromType = "SYMBOL",
+    toType = "ENTREZID",
+    OrgDb = org_db
+  ) %>%
+    distinct(SYMBOL, .keep_all = TRUE)  # 去重
+  
+  # Merge results
+  markers %>%
+    left_join(gene_mapping, by = c("gene" = "SYMBOL")) %>%
+    arrange(desc(avg_log2FC)) %>%
+    tibble::as_tibble()
+}
+
+# Batch differential analysis
+comparisons <- list(
+  list(ident1 = "control39", ident2 = "before_treated", group = "recurrent_vs_primary"),
+  list(ident1 = "treated37", ident2 = "before_treated", group = "treated-recurrent_vs_primary"),
+  list(ident1 = "treated37", ident2 = "control39", group = "treated-recurrent_vs_recurrent")
+)
+
+result_list <- lapply(comparisons, function(params) {
+  res <- run_diff_analysis(hg, params$ident1, params$ident2)
+  res$group <- params$group
+  res
+})
+
+
+saveRDS(do.call(rbind, result_list), '/mnt/raid62/pzz/ding/out/c1/out/recurrent/each_sample_deg.Rds')
+```
+
+

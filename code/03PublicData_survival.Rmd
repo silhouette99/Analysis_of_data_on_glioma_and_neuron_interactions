@@ -1,0 +1,447 @@
+---
+title: "survival analysis"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+## GLASS recurrent IDHwt GBM
+```{r}
+library(openxlsx)
+library(dplyr)
+library(readr)
+library(stringr)
+library(data.table)
+library(survival)
+library(survminer)
+library(tibble)
+library(SummarizedExperiment)
+
+
+# Load metadata
+all_meta <- read_csv('/mnt/raid62/pzz/GLSS/meta/Job-2134726913294944750552992782.csv')
+clinal <- read_csv("/mnt/raid62/pzz/GLSS/Job-3968149415267597282451676377.csv") %>%
+  filter(idh_codel_subtype == 'IDHwt')  # Filter IDHwt samples
+
+# Process primary and recurrent samples
+pr_clinal <- filter(clinal, str_detect(sample_barcode, '-TP'))  # Primary samples
+re_clinal <- filter(clinal, !str_detect(sample_barcode, '-TP'))  # Recurrent samples
+
+# Load expression matrix
+mtx <- fread("/mnt/raid61/public_data/GBM_public_dataset/GLASS/gene_tpm_matrix_all_samples.tsv") %>%
+  column_to_rownames("Gene_symbol") %>%
+  as.matrix()
+colnames(mtx) <- gsub('\\.', '-', colnames(mtx))
+mtx <- log10(mtx + 1)  # Perform log10 transformation
+
+# Process recurrent samples
+re_clinal <- re_clinal %>%
+  filter(str_detect(sample_barcode, '-R1'), histology == 'Glioblastoma') %>%
+  left_join(all_meta %>% select(case_barcode, case_vital_status, case_overall_survival_mo),
+            by = "case_barcode")
+
+# Match sample barcodes with file names in the expression matrix
+files <- colnames(mtx)
+files <- sapply(unique(re_clinal$sample_barcode), function(x) {
+  match_file <- grep(x, files, value = TRUE)
+  if (length(match_file) > 0) match_file[1] else NA
+})
+re_clinal$files <- files
+
+# Survival analysis function
+survival_glass <- function(cli_info, gene, cut = 0.5, mtx) {
+  stopifnot(is.data.frame(cli_info), is.matrix(mtx))
+  if (!gene %in% rownames(mtx))
+    stop(paste("Gene", gene, "not found in mtx."))
+  
+  # Extract gene expression values
+  cli_info <- cli_info %>%
+    mutate(gene_expr = mtx[gene, match(files, colnames(mtx))]) %>%
+    filter(!is.na(gene_expr),!is.na(case_overall_survival_mo))
+  
+  if (nrow(cli_info) == 0)
+    stop("No valid data after filtering.")
+  
+  # Define survival status and group classification
+  cli_info <- cli_info %>%
+    mutate(
+      vital_status = ifelse(case_vital_status == "alive", 0, 1),
+      group = ifelse(
+        gene_expr > quantile(gene_expr, cut, na.rm = TRUE),
+        'High',
+        'Low'
+      )
+    )
+  cli_info$group <- factor(cli_info$group, levels = c("High","Low"))
+  if (length(unique(cli_info$group)) < 2)
+    stop("Only one group formed.")
+  
+  # Perform survival analysis
+  fit <-
+    survfit(Surv(case_overall_survival_mo, vital_status) ~ group, data = cli_info)
+  print(fit)
+  
+  # Plot survival curve
+  ggsurvplot(
+    fit,
+    data = cli_info,
+    pval = TRUE,
+    conf.int = TRUE,
+    risk.table = TRUE,
+    legend.title = gene,
+    legend.labs = c("High","Low"),
+    palette = "lancet"
+    # ,ggtheme = theme_minimal()
+  ) + labs(title = paste("Survival Analysis of", gene))
+}
+
+
+
+vln_glass <- function(cli_info, gene, cut = 0.5, mtx) {
+  stopifnot(is.data.frame(cli_info), is.matrix(mtx))
+  if (!gene %in% rownames(mtx))
+    stop(paste("Gene", gene, "not found in mtx."))
+  
+  # Extract gene expression values
+  cli_info <- cli_info %>%
+    mutate(gene_expr = mtx[gene, match(files, colnames(mtx))]) %>%
+    filter(!is.na(gene_expr),!is.na(case_overall_survival_mo))
+  
+  if (nrow(cli_info) == 0)
+    stop("No valid data after filtering.")
+  
+  # Define survival status and group classification
+  cli_info <- cli_info %>%
+    mutate(
+      vital_status = ifelse(case_vital_status == "alive", 0, 1),
+      group = ifelse(
+        gene_expr > quantile(gene_expr, cut, na.rm = TRUE),
+        'High',
+        'Low'
+      )
+    )
+  cli_info$group <- factor(cli_info$group, levels = c("Low", "High"))
+  if (length(unique(cli_info$group)) < 2)
+    stop("Only one group formed.")
+  
+  # Perform survival analysis
+  ggviolin(cli_info, x = 'group', y = 'gene_expr', color = 'group', fill = 'group',add = c('jitter','boxplot'),add.params = list(color = 'black'))
+}
+
+
+
+## recurrent
+survival_glass(re_clinal, 'C1QL1', cut = 0.6, mtx)
+vln_glass(re_clinal, gene = 'C1QL1', cut = 0.5, mtx = mtx)
+
+## primary
+
+pr_clinal <- pr_clinal %>%
+  filter(str_detect(sample_barcode, '-TP'), histology == 'Glioblastoma') %>%
+  left_join(all_meta %>% select(case_barcode, case_vital_status, case_overall_survival_mo),
+            by = "case_barcode")
+
+# Match sample barcodes with file names in the expression matrix
+files <- colnames(mtx)
+files <- sapply(unique(pr_clinal$sample_barcode), function(x) {
+  match_file <- grep(x, files, value = TRUE)
+  if (length(match_file) > 0)
+    match_file[1]
+  else
+    NA
+})
+pr_clinal$files <- files
+
+survival_glass(pr_clinal, 'C1QL1', cut = 0.5, mtx)
+vln_glass(pr_clinal, gene = 'C1QL1', cut = 0.5, mtx = mtx)
+
+```
+
+
+## CGGA recurrent GBM
+```{r}
+library(data.table) 
+library(dplyr)
+library(tibble)
+library(survival)
+library(survminer)
+
+setwd('/mnt/raid61/public_data/GBM_public_dataset/CGGA/RNA-seq/')
+
+# Load expression matrix
+mtx1 <- fread('CGGA.mRNAseq_325.Read_Counts-genes.20220620.txt') %>%
+  column_to_rownames(var = "gene_name") %>%
+  as.matrix()
+
+# Load clinical data
+clinical_cgga1 <- read.table('CGGA.mRNAseq_325_clinical.20200506.txt', sep = '\t', header = TRUE)
+
+# Match samples
+clinical_cgga1 <- clinical_cgga1 %>% filter(CGGA_ID %in% colnames(mtx1))
+
+# Select samples with WHO IV grade
+clinical_cgga1 <- clinical_cgga1 %>% filter(Grade == "WHO IV")
+
+# Assign group label
+clinical_cgga1$group <- 1
+
+# Reorder expression matrix to match clinical data
+mtx1 <- mtx1[, clinical_cgga1$CGGA_ID]
+
+# Log10 transformation of the expression matrix
+mtx1 <- log10(mtx1 + 1)
+
+# Extract gene expression data
+clinical_cgga1 <- clinical_cgga1 %>%
+  mutate(
+    BAI3 = mtx1["BAI3", match(CGGA_ID, colnames(mtx1))],
+    C1QL1 = mtx1["C1QL1", match(CGGA_ID, colnames(mtx1))]
+  )
+
+# Select recurrent patients
+# clinical_cgga1 <- clinical_cgga1[clinical_cgga1$IDH_mutation_status == 'Wildtype',]
+reclinical_cgga1 <- clinical_cgga1 %>% filter(PRS_type == "Recurrent")
+
+# Group patients based on C1QL1 expression level
+reclinical_cgga1 <- reclinical_cgga1 %>%
+  mutate(group1 = ifelse(C1QL1 > quantile(C1QL1, 0.4), "high", "low"))
+reclinical_cgga1$group1 <- factor(reclinical_cgga1$group1, levels = c('high', 'low'))
+
+# Perform survival analysis
+reclinical_cgga1$OS <- reclinical_cgga1$OS/30
+fit <- survfit(Surv(OS, Censor..alive.0..dead.1.) ~ group1, data = reclinical_cgga1)
+
+# Visualization
+# ggsurvplot(fit, pval = TRUE, conf.int = TRUE, risk.table = TRUE)
+ggsurvplot(
+  fit,
+  data = reclinical_cgga1,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  legend.title = 'C1QL1',
+  legend.labs = c("High","Low"),
+  palette = "lancet"
+  # ,ggtheme = theme_minimal()
+) + labs(title = paste("Survival Analysis of", 'C1QL1'))
+
+## primary
+
+# Select recurrent patients
+prclinical_cgga1 <- clinical_cgga1 %>% filter(PRS_type == "Primary")
+
+# Group patients based on C1QL1 expression level
+prclinical_cgga1 <- prclinical_cgga1 %>%
+  mutate(group1 = ifelse(C1QL1 > quantile(C1QL1, 0.45), "high", "low"))
+prclinical_cgga1$group1 <- factor(prclinical_cgga1$group1, levels = c("high", "low"))
+
+# Perform survival analysis
+prclinical_cgga1$OS <- prclinical_cgga1$OS/30
+fit <-
+  survfit(Surv(OS, Censor..alive.0..dead.1.) ~ group1, data = prclinical_cgga1)
+
+# Visualization
+# ggsurvplot(
+#   fit,
+#   pval = TRUE,
+#   conf.int = TRUE,
+#   risk.table = TRUE,
+#   palette = "lancet"
+# )
+ggsurvplot(
+  fit,
+  data = prclinical_cgga1,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  legend.title = 'C1QL1',
+  legend.labs = c("High","Low"),
+  palette = "lancet"
+  # ,ggtheme = theme_minimal()
+) + labs(title = paste("Survival Analysis of", 'C1QL1'))
+```
+
+## GLASS Tumor recurrence interval & Survival period after recurrence
+```{r}
+library(data.table)
+library(dplyr)
+library(survival)
+library(survminer)
+library(ggplot2)
+
+# Load clinical metadata
+meta <- read.xlsx('/mnt/raid62/pzz/ding/GLASS_clinal_new.xlsx')
+df <- meta[meta$Initial.Tumor.Histology == 'Glioblastoma' & 
+           meta$IDHcodel.subtype == "IDHwt_noncodel", ]
+
+# Load and process expression matrix
+mtx <- fread("/mnt/raid61/public_data/GBM_public_dataset/GLASS/gene_tpm_matrix_all_samples.tsv")
+mtx <- column_to_rownames(mtx, "Gene_symbol")
+mtx <- as.matrix(mtx)
+colnames(mtx) <- gsub('\\.', '-', colnames(mtx))
+
+# Process clinical data
+all_meta <- read_csv('/mnt/raid62/pzz/GLSS/meta/Job-2134726913294944750552992782.csv')
+clinal <- read_csv("/mnt/raid62/pzz/GLSS/Job-3968149415267597282451676377.csv") 
+clinal <- clinal[clinal$idh_codel_subtype == 'IDHwt' & 
+                grepl('-TP|-R1', clinal$sample_barcode), ]
+
+# Match sample IDs with expression matrix
+file_df <- data.frame(
+  case.barcode = substr(colnames(mtx), 1, 15),
+  file = colnames(mtx)
+)
+file_df <- file_df[!duplicated(file_df$case.barcode), ]
+clinal$file <- file_df$file[match(clinal$sample_barcode, file_df$case.barcode)]
+
+# Add gene expression values
+mtx <- log10(mtx + 1)
+clinal <- clinal %>%
+  mutate(gene_expr = mtx['C1QL1', match(clinal$file, colnames(mtx))]) %>% as.data.frame()
+
+# Merge clinical data
+clinal <- merge(clinal, 
+               all_meta[, c("case_barcode", "case_vital_status", "case_overall_survival_mo")],
+               by = "case_barcode")
+clinal <- clinal[clinal$histology == 'Glioblastoma', ]
+
+# Prepare analysis datasets
+re_clinal <- clinal[grepl('-R1', clinal$sample_barcode) & !is.na(clinal$gene_expr), ]
+pr_clinal <- clinal[grepl('-TP', clinal$sample_barcode) & !is.na(clinal$gene_expr), ]
+
+# Merge back to original metadata
+meta$primary_C1QL1 <- pr_clinal$gene_expr[match(meta$Case.barcode, pr_clinal$case_barcode)]
+meta$recurrent_C1QL1 <- re_clinal$gene_expr[match(meta$Case.barcode, re_clinal$case_barcode)]
+
+# Prepare final analysis data
+analysis_df <- meta[!is.na(meta$recurrent_C1QL1) & !is.na(meta$`Time.to.first.recurrence.(mths)`), ]
+primary_df <- meta[!is.na(meta$primary_C1QL1) & !is.na(meta$`Time.to.first.recurrence.(mths)`), ]
+
+# Convert time variables
+analysis_df$TTR <- as.numeric(analysis_df$`Time.to.first.recurrence.(mths)`)
+primary_df$TTR <- as.numeric(primary_df$`Time.to.first.recurrence.(mths)`)
+
+# Create groups for analysis
+analysis_df$recurrent_group <- ifelse(analysis_df$recurrent_C1QL1 > 1, 'up', 'down')
+primary_df$primary_group <- ifelse(primary_df$primary_C1QL1 > 1, 'up', 'down')
+
+# Generate correlation plots 
+recurrent_plot <- ggplot(analysis_df, aes(y = TTR, x = recurrent_C1QL1)) + 
+  geom_point(color = '#003f7d', alpha = 0.6) + 
+  geom_smooth(method = 'lm', color = '#003f7d', fill = '#003f7d') +  
+  ggpubr::stat_cor(method = "spearman") + 
+  theme_bw() + 
+  labs(title = "Recurrent Tumors Correlation", 
+       y = "Time to Recurrence (months)", 
+       x = "C1QL1 Expression Level")
+
+primary_plot <- ggplot(primary_df, aes(y = TTR, x = primary_C1QL1)) + 
+  geom_point(color = '#003f7d', alpha = 0.6) + 
+  geom_smooth(method = 'lm', color = '#003f7d', fill = '#003f7d') +  
+  ggpubr::stat_cor(method = "spearman") + 
+  theme_bw() + 
+  labs(title = "Primary Tumors Correlation", 
+       y = "Time to Recurrence (months)", 
+       x = "C1QL1 Expression Level")
+
+# Generate violin plots
+recurrent_violin <- ggplot(analysis_df, aes(x = recurrent_group, y = TTR)) +
+  geom_violin(aes(fill = recurrent_group)) +
+  geom_boxplot(width = 0.1) +
+  labs(title = "Recurrent Tumors Expression Groups", 
+       x = "Expression Group", 
+       y = "Time to Recurrence (months)") +
+  ggpubr::stat_compare_means(comparisons = list(c('up', 'down')), 
+                            method = 't.test') +
+  ylim(0, 85)
+
+primary_violin <- ggplot(primary_df, aes(x = primary_group, y = TTR)) +
+  geom_violin(aes(fill = primary_group)) +
+  geom_boxplot(width = 0.1) +
+  labs(title = "Primary Tumors Expression Groups", 
+       x = "Expression Group", 
+       y = "Time to Recurrence (months)") +
+  ggpubr::stat_compare_means(comparisons = list(c('up', 'down')), 
+                            method = 't.test') +
+  ylim(0, 85)
+
+# Save combined plots
+pdf('/mnt/raid62/pzz/ding/out2/recurrent_stage.pdf', width = 7, height = 4)
+print((recurrent_plot | primary_plot) / (recurrent_violin | primary_violin))
+dev.off()
+
+# Survival analysis
+survival_df <- analysis_df %>%
+  mutate(vital_status = ifelse(Vital.Status == 'deceased', 1, 0))
+
+surv_fit <- survfit(Surv(`Post-recurrence.survival.(mths)`, vital_status) ~ recurrent_group, 
+                   data = survival_df)
+
+pdf('/mnt/raid62/pzz/ding/out2/survival_primary_GLSS_post_recurrent.pdf', 
+    width = 5, height = 7)
+ggsurvplot(surv_fit, 
+          pval = TRUE, 
+          conf.int = TRUE, 
+          risk.table = TRUE, 
+          palette = "lancet",
+          title = "Post-Recurrence Survival Analysis",
+          xlab = "Survival Time (months)",
+          ylab = "Survival Probability")
+dev.off()
+
+# Save analysis results
+write.xlsx(survival_df, '/mnt/raid62/pzz/ding/out2/coord_clinal_glss.xlsx')
+
+```
+
+
+## TCGA
+```{r}
+tcga <-
+  readRDS('/mnt/raid61/public_data/GBM_public_dataset/TCGA/RNA-seq/TCGA_RNA_assay.Rds')
+
+count_matrix <- log10(assay(tcga, "tpm_unstrand") + 1)
+meta <- tcga@colData %>% as.data.frame()
+meta$C1QL1 <-
+  count_matrix[grep(pattern = 'ENSG00000131094', rownames(count_matrix)),]
+
+meta <-
+  meta[which(
+    meta$tumor_descriptor == 'Primary' &
+      meta$tissue_type == 'Tumor' &
+      meta$paper_Histology == 'glioblastoma' &
+      meta$paper_IDH.status == 'WT'
+  ),]
+
+meta <- meta %>%
+  mutate(group1 = ifelse(C1QL1 > quantile(C1QL1, 0.5), "high", "low"))
+
+meta[which(is.na(meta$days_to_death) &
+             meta$vital_status == 'Alive'), 'days_to_death'] <-
+  meta[which(is.na(meta$days_to_death) &
+               meta$vital_status == 'Alive'), 'days_to_last_follow_up']
+
+meta <- meta[meta$vital_status != 'Not Reported', ]
+meta$vital_status <- ifelse(meta$vital_status == "Alive", 0, 1)
+
+meta$days_to_death <- meta$days_to_death/30
+fit <- survfit(Surv(days_to_death, vital_status) ~ group1, data = meta)
+
+# Visualization
+# ggsurvplot(fit, pval = TRUE, conf.int = TRUE, risk.table = TRUE)
+ggsurvplot(
+  fit,
+  data = meta,
+  pval = TRUE,
+  conf.int = TRUE,
+  risk.table = TRUE,
+  legend.title = 'C1QL1',
+  legend.labs = c("Low", "High"),
+  palette = "lancet"
+  # ,ggtheme = theme_minimal()
+) + labs(title = paste("Survival Analysis of", 'C1QL1'))
+
+
+```

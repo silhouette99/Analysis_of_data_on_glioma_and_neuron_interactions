@@ -1,0 +1,433 @@
+---
+title: "bulk RNA-seq"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+# C1KO processing
+```{r}
+setwd("/mnt/raid62/zhouran/project/ding")
+library(Seurat)
+library(reshape2)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(DESeq2)
+meta <- data.table::fread('meta.tsv')
+meta$new_ident <- paste0(meta$group, meta$treatment)
+species = 'hg19'
+# if (species == 'mm10') {
+#   orgdb <- org.Mm.eg.db
+# } else {
+#   orgdb <- org.Hs.eg.db
+# }
+
+
+file_loc <- glue::glue('/home/zhouran/tmp/ding_proj/data/final/{species}/')
+
+meta_inf <- tibble(
+  file = paste0(file_loc, meta$label, '.ReadsPerGene.out.tab'),
+  label = stringr::str_remove(basename(file), '.ReadsPerGene.out.tab'),
+  rep = sapply(strsplit(label, split = '-'), '[[', 2),
+  group = sapply(strsplit(label, split = '-'), '[[', 1)
+)
+
+lapply(1:dim(meta_inf)[1], function(x) {
+  mtx <- data.table::fread(meta_inf$file[x])[-(1:4)] %>%
+    select(V1, V2) %>%
+    setnames(old = c('V1', 'V2'),
+             new = c('Gene', meta_inf$label[x]))
+  
+  mtx
+}) -> mtx
+
+mtx <- Reduce(merge, mtx) %>% data.frame()
+colnames(mtx) <- stringr::str_replace_all(colnames(mtx), '[.]', '-')
+
+dds <-
+  DESeqDataSetFromMatrix(tibble::column_to_rownames(mtx, 'Gene') %>% as.matrix(),
+                         meta_inf,
+                         design = ~ group)
+# dds <- dds[rowSums(counts(dds)) >=1]
+dds <- DESeq(dds)
+# 
+# symbol_id <- c('GABRA1',
+#                'GABRB2',
+#                'GABRG2',
+#                'GABRB3',
+#                'GABRA6',
+#                'GABBR1',
+#                'GABBR2')
+symbol_id <- c('OLIG2',' PDGFRA')
+ens_id <- c('ENSG00000205927','ENSG00000134853')
+# ens_id <- c(
+#   'ENSG00000022355',
+#   'ENSG00000145864',
+#   'ENSG00000113327',
+#   'ENSG00000166206',
+#   'ENSG00000145863',
+#   'ENSG00000204681',
+#   'ENSG00000136928'
+# )
+names(symbol_id) = ens_id
+
+lapply(ens_id, function(x){
+  
+  exp_res <- plotCounts(dds,
+                        gene = x,
+                        intgroup = 'group',
+                        returnData = T)
+  exp_res$new_group <-
+    ifelse(stringr::str_detect(exp_res$group, 'scramble'), 'WT', 'KD')
+  
+  library(ggplot2)
+  library(ggpubr)
+  ggplot(exp_res, aes(x = group, y = count)) +
+    geom_boxplot(width = 0.5) + 
+    geom_dotplot(aes(fill = group), binaxis = 'y', stackdir = 'center') +
+    theme_pubclean() + Seurat::NoLegend() + theme(axis.text.x = element_text(
+      angle = 30,
+      hjust = 0.95,
+      vjust = 0.9
+    )) + ylab(glue::glue('Normalized expression\n{symbol_id[x]}')) -> p
+  p
+}) -> p_lst
+
+pdf.options(paper = 'a4')
+pdf('Olig2_genes.pdf', 4, 4.5)
+p_lst
+dev.off()
+
+saveRDS(dds, file = 'merge_all.dds.Rds')
+```
+
+# Neuron + BNI23 processing
+```{r}
+rm(list=ls())
+setwd("/mnt/raid62/zhouran/project/ding")
+library(Seurat)
+library(reshape2)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(ggpubr)
+library(DESeq2)
+meta <- data.table::fread('meta.tsv')
+meta$new_ident <- paste0(meta$group, meta$treatment)
+species = 'mm10'
+# if (species == 'mm10') {
+#   orgdb <- org.Mm.eg.db
+# } else {
+#   orgdb <- org.Hs.eg.db
+# }
+
+
+file_loc <- glue::glue('/home/zhouran/tmp/ding_proj/data/final/{species}/')
+
+meta_inf <- tibble(
+  file = paste0(file_loc, meta$label, '.ReadsPerGene.out.tab'),
+  label = stringr::str_remove(basename(file), '.ReadsPerGene.out.tab'),
+  rep = sapply(strsplit(label, split = '-'), '[[', 2),
+  group = sapply(strsplit(label, split = '-'), '[[', 1)
+)
+meta_inf <- meta_inf[grep('N+', meta_inf$group), ]
+lapply(1:dim(meta_inf)[1], function(x) {
+  mtx <- data.table::fread(meta_inf$file[x])[-(1:4)] %>%
+    dplyr::select(V1, V2) %>%
+    setnames(old = c('V1', 'V2'),
+             new = c('Gene', meta_inf$label[x]))
+  
+  mtx
+}) -> mtx
+
+mtx <- Reduce(merge, mtx) %>% data.frame()
+colnames(mtx) <- stringr::str_replace_all(colnames(mtx), '[.]', '-')
+
+dds <-
+  DESeqDataSetFromMatrix(tibble::column_to_rownames(mtx, 'Gene') %>% as.matrix(),
+                         meta_inf,
+                         design = ~ group)
+# dds <- dds[rowSums(counts(dds)) >=1]
+dds <- DESeq(dds)
+names(symbol_id) = ens_id
+
+lapply(ens_id, function(x){
+  
+  exp_res <- plotCounts(dds,
+                        gene = x,
+                        intgroup = 'group',
+                        returnData = T)
+  exp_res$new_group <-
+    ifelse(stringr::str_detect(exp_res$group, 'scramble'), 'WT', 'KD')
+  
+  library(ggplot2)
+  library(ggpubr)
+  ggplot(exp_res, aes(x = group, y = count)) +
+    geom_boxplot(width = 0.5) + 
+    geom_dotplot(aes(fill = group), binaxis = 'y', stackdir = 'center') +
+    theme_pubclean() + Seurat::NoLegend() + theme(axis.text.x = element_text(
+      angle = 30,
+      hjust = 0.95,
+      vjust = 0.9
+    )) + ylab(glue::glue('Normalized expression\n{symbol_id[x]}')) -> p
+  p
+}) -> p_lst
+
+pdf.options(paper = 'a4')
+pdf('Olig2_genes.pdf', 4, 4.5)
+p_lst
+dev.off()
+
+saveRDS(dds, file = 'merge_all.dds.mm.Rds')
+```
+
+```{r}
+# Professionalized DESeq2 + enrichment pipeline
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(dplyr)
+  library(clusterProfiler)
+  library(org.Hs.eg.db)
+  library(org.Mm.eg.db)
+  library(ggplot2)
+  library(ggrepel)
+  library(ggpubr)
+  library(openxlsx)
+})
+
+# ---------- Utility helpers ----------
+safe_bitr <- function(ids, fromType, toType, OrgDb) {
+  if (length(ids) == 0) return(data.frame())
+  tryCatch(
+    bitr(ids, fromType = fromType, toType = toType, OrgDb = OrgDb),
+    error = function(e) {
+      message("Annotation failed: ", e$message)
+      return(data.frame())
+    }
+  )
+}
+
+save_xlsx <- function(df, file) {
+  dir.create(dirname(file), recursive = TRUE, showWarnings = FALSE)
+  openxlsx::write.xlsx(df, file, overwrite = TRUE)
+  message("Saved: ", file)
+}
+
+# Volcano plotting helper
+plot_volcano <- function(df, x = "log2FoldChange", y = "padj",
+                         label_col = "lab", out_file = NULL,
+                         palette = c('Up'='#CC0000','Down'='#006ABC','Non-significant'='#BBBBBB'),
+                         xcut = 1, ycut = 0.05) {
+  df <- df %>% mutate(yval = -log10(.data[[y]]))
+  p <- ggplot(df, aes(x = .data[[x]], y = yval)) +
+    geom_point(aes(color = group), size = 2, alpha = 0.6) +
+    geom_vline(xintercept = c(-xcut, xcut), linetype = "dashed", color = "grey50") +
+    geom_hline(yintercept = -log10(ycut), linetype = "dashed", color = "grey50") +
+    geom_text_repel(aes(label = .data[[label_col]]),
+                    min.segment.length = 0, box.padding = 0.6, point.padding = 0.6,
+                    segment.color = 'black', show.legend = FALSE) +
+    scale_color_manual(values = palette) +
+    theme_pubclean() +
+    labs(x = "log2 fold change", y = paste0("-log10(", y, ")"))
+  if (!is.null(out_file)) {
+    dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
+    ggsave(out_file, p, width = 8, height = 6)
+    message("Volcano saved to: ", out_file)
+  }
+  invisible(p)
+}
+
+# GO bubble plot for selected terms
+plot_go_bubble <- function(go_df, term_filter = NULL, out_file = NULL, width = 10, height = 6) {
+  if (!is.null(term_filter)) {
+    go_df <- go_df %>% filter(Description %in% term_filter)
+  }
+  if (nrow(go_df) == 0) {
+    warning("No GO terms to plot.")
+    return(NULL)
+  }
+  go_df <- go_df %>% mutate(Description = factor(Description, levels = unique(Description)))
+  p <- ggplot(go_df, aes(x = Count, y = Description)) +
+    geom_point(aes(size = Count, color = p.adjust)) +
+    scale_colour_gradientn(colours = c('red', 'pink', 'purple', 'blue')) +
+    theme_bw() +
+    theme(
+      axis.text.y = element_text(size = rel(1.2), color = 'black'),
+      axis.text.x = element_text(size = rel(1.1), color = 'black'),
+      axis.title.y = element_blank()
+    )
+  if (!is.null(out_file)) {
+    dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
+    ggsave(out_file, p, width = width, height = height)
+    message("GO bubble saved to: ", out_file)
+  }
+  invisible(p)
+}
+
+# ---------- Main analysis function ----------
+run_deseq_pipeline <- function(
+  dds_rds,
+  contrast_vec,
+  species = c("human", "mouse"),
+  outdir = "./deseq_out",
+  baseMean_cut = 10,
+  pval_cut = 0.05,
+  lfc_up = 1,
+  lfc_down = -1,
+  top_label_genes = character(),
+  custom_labels = character()
+) {
+  species <- match.arg(species)
+  OrgDb <- if (species == "human") org.Hs.eg.db else org.Mm.eg.db
+  message("Species: ", species, " using OrgDb: ", deparse(substitute(OrgDb)))
+  dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
+
+  # 1) load dds
+  dds <- readRDS(dds_rds)
+  if (!inherits(dds, "DESeqDataSet")) stop("Provided RDS is not a DESeqDataSet.")
+  message("Running DESeq() ...")
+  dds <- DESeq(dds)
+
+  # 2) results
+  res <- results(dds, contrast = contrast_vec)
+  res_df <- as.data.frame(res) %>%
+    tibble::rownames_to_column(var = "gene_ensembl")
+  message("Total genes in result: ", nrow(res_df))
+
+  # filter by baseMean & pvalue
+  deg <- res_df %>%
+    filter(baseMean > baseMean_cut & pvalue < pval_cut) %>%
+    arrange(desc(log2FoldChange))
+
+  # 3) annotate SYMBOL and ENTREZID
+  ann_sym <- safe_bitr(deg$gene_ensembl, fromType = "ENSEMBL", toType = "SYMBOL", OrgDb = OrgDb)
+  ann_entrez <- safe_bitr(deg$gene_ensembl, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = OrgDb)
+
+  deg <- deg %>%
+    left_join(ann_sym %>% rename(gene_ensembl = ENSEMBL, SYMBOL = SYMBOL), by = "gene_ensembl") %>%
+    left_join(ann_entrez %>% rename(gene_ensembl = ENSEMBL, ENTREZID = ENTREZID), by = "gene_ensembl")
+
+  # 4) assign groups
+  deg <- deg %>%
+    mutate(group = "Non-significant",
+           group = case_when(
+             log2FoldChange > lfc_up & padj < pval_cut ~ "Up",
+             log2FoldChange < lfc_down & padj < pval_cut ~ "Down",
+             TRUE ~ group
+           ))
+
+  # 5) labeling genes for volcano
+  # combine top_label_genes (gene SYMBOLs) and any custom labels
+  labels <- unique(c(top_label_genes, custom_labels))
+  if (length(labels) > 0) {
+    deg <- deg %>% mutate(lab = ifelse(SYMBOL %in% labels, SYMBOL, NA_character_))
+  } else {
+    deg$lab <- NA_character_
+  }
+
+  # 6) save DEG table
+  out_deg_file <- file.path(outdir, paste0("DEG_", contrast_vec[2], "_vs_", contrast_vec[3], ".xlsx"))
+  save_xlsx(deg, out_deg_file)
+
+  # 7) volcano
+  volcano_file <- file.path(outdir, "volcano.pdf")
+  plot_volcano(deg, out_file = volcano_file)
+
+  # 8) GO enrichment (per direction)
+  get_geneid_vector <- function(subset_df) {
+    ids <- subset_df$ENTREZID
+    ids <- ids[!is.na(ids)]
+    unique(ids)
+  }
+
+  go_up <- NULL; go_down <- NULL
+  if (any(deg$group == "Up")) {
+    ids_up <- get_geneid_vector(filter(deg, group == "Up"))
+    if (length(ids_up) > 0) {
+      go_up <- enrichGO(ids_up, OrgDb = OrgDb, ont = 'BP', pvalueCutoff = 1, qvalueCutoff = 1)
+      go_up <- as.data.frame(go_up)
+      if (nrow(go_up)) go_up$group <- "Up"
+    }
+  }
+  if (any(deg$group == "Down")) {
+    ids_down <- get_geneid_vector(filter(deg, group == "Down"))
+    if (length(ids_down) > 0) {
+      go_down <- enrichGO(ids_down, OrgDb = OrgDb, ont = 'BP', pvalueCutoff = 1, qvalueCutoff = 1)
+      go_down <- as.data.frame(go_down)
+      if (nrow(go_down)) go_down$group <- "Down"
+    }
+  }
+
+  go_all <- bind_rows(go_up, go_down)
+  # keep significant terms
+  go_sig <- go_all %>% filter(p.adjust < 0.05)
+  if (nrow(go_sig) > 0) {
+    save_xlsx(go_sig, file.path(outdir, "GO_enrichment.xlsx"))
+  } else {
+    message("No significant GO terms (padj < 0.05). Saving full GO results if present.")
+    if (nrow(go_all) > 0) save_xlsx(go_all, file.path(outdir, "GO_enrichment_all.xlsx"))
+  }
+
+  # 9) optionally bubble-plot a hand-picked pathway list (user may change this)
+  # Example pathway filter (user can pass custom list instead)
+  example_pathways <- c(
+    'cell junction assembly','cell-cell adhesion via plasma-membrane adhesion molecules',
+    'regulation of membrane potential','regulation of trans-synaptic signaling',
+    'gliogenesis','mesenchyme development','glial cell differentiation',
+    'Notch signaling pathway','regulation of neuron differentiation','epithelial to mesenchymal transition'
+  )
+  go_down_filtered <- go_sig %>% filter(group == "Down" & Description %in% example_pathways)
+  if (nrow(go_down_filtered) > 0) {
+    plot_go_bubble(go_down_filtered,
+                   term_filter = unique(go_down_filtered$Description),
+                   out_file = file.path(outdir, "GO_bubble_filtered.pdf"))
+  }
+
+  # 10) GSEA (requires numeric ranking vector)
+  gsea_df <- deg %>% filter(!is.na(ENTREZID) & !is.na(log2FoldChange) & padj < 0.05)
+  if (nrow(gsea_df) > 0) {
+    gs <- gsea_df$log2FoldChange
+    names(gs) <- gsea_df$ENTREZID
+    gs <- sort(gs, decreasing = TRUE)
+    gsea_res <- tryCatch(
+      gseGO(gs, ont = 'BP', OrgDb = OrgDb, pvalueCutoff = 1),
+      error = function(e) { message("gseGO failed: ", e$message); NULL }
+    )
+    if (!is.null(gsea_res)) {
+      gsea_tbl <- as.data.frame(gsea_res)
+      gsea_sig <- gsea_tbl %>% filter(p.adjust < 0.05)
+      if (nrow(gsea_sig) > 0) save_xlsx(gsea_sig, file.path(outdir, "GSEA_BP_sig.xlsx"))
+    }
+  } else {
+    message("No genes passed threshold for GSEA.")
+  }
+
+  message("Pipeline finished. Outputs in: ", normalizePath(outdir))
+  invisible(list(deg = deg, go = go_sig))
+}
+
+# ---------- Example usage (modify arguments as needed) ----------
+# Human example:
+# run_deseq_pipeline(
+#   dds_rds = '/mnt/raid62/zhouran/project/ding/merge_all.dds.Rds',
+#   contrast_vec = c('group', 'C1KO', 'C1V2TH'),
+#   species = "human",
+#   outdir = '/mnt/raid62/pzz/ding/out2',
+#   top_label_genes = c('MAGEA10','FABP7','GJA1'),
+#   custom_labels = c('SPARC','TGFB1','NOTCH1')
+# )
+#
+# Mouse example:
+# run_deseq_pipeline(
+#   dds_rds = '/mnt/raid62/zhouran/project/ding/merge_all.dds.mm.Rds',
+#   contrast_vec = c('group', 'N+C1KO', 'N+C1V2TH'),
+#   species = "mouse",
+#   outdir = '/mnt/raid62/pzz/ding/out/c1',
+#   top_label_genes = c('Arc','Fos','Egr1','Jund','Junb')
+# )
+
+```

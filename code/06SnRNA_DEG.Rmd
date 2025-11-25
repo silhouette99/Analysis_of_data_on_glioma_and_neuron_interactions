@@ -1,0 +1,347 @@
+---
+title: "snRNA analysis"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+
+
+
+```{r}
+# ==================== package ====================
+required_packages <- c(
+  "Seurat", "dplyr", "ggplot2", "clusterProfiler", 
+  "org.Hs.eg.db", "org.Mm.eg.db", "tibble", "purrr",
+  "GSVA", "pheatmap", "cowplot", "openxlsx"
+)
+
+suppressPackageStartupMessages({
+  for(pkg in required_packages) {
+    if(!require(pkg, character.only = TRUE)) {
+      install.packages(pkg)
+      library(pkg, character.only = TRUE)
+    }
+  }
+})
+
+# ==================== config ====================
+CONFIG <- list(
+  paths = list(
+    input_data = '/mnt/raid62/pzz/ding/out/c1/out/recurrent/obj.Rdata',
+    deg_human = '/mnt/raid62/pzz/ding/out/c1/out/recurrent/each_sample_deg.Rds',
+    go_set_hg = '/mnt/raid62/pzz/always_func/GO_set_hg.Rda',
+    go_set_mm = '/mnt/raid62/pzz/always_func/GO_set_mm.Rda',
+    custom_func = '/mnt/raid62/pzz/always_func/GO_set.R',
+    output_dir = '/mnt/raid62/pzz/ding/out3'
+  ),
+  thresholds = list(
+    lfc = 0.5,
+    padj = 0.05,
+    min_geneset_size = 3
+  )
+)
+
+# ==================== function ====================
+
+#' 
+perform_go_enrichment <- function(deg_df, species = "human") {
+  org_db <- if(species == "human") org.Hs.eg.db else org.Mm.eg.db
+  
+  process_group <- function(genes, group_name, direction) {
+    if(length(genes) == 0) return(NULL)
+    
+    go_result <- enrichGO(
+      genes, OrgDb = org_db, ont = 'BP',
+      pvalueCutoff = 1, qvalueCutoff = 1
+    ) %>% 
+      clusterProfiler::setReadable(OrgDb = org_db, keyType = 'ENTREZID')
+    
+    result_df <- go_result@result
+    result_df$stat <- group_name
+    result_df$direction <- direction
+    
+    
+    result_df$Enrichment_Ratio <- mapply(
+      function(gr, bg) {
+        gr_num <- eval(parse(text = gr))
+        bg_num <- eval(parse(text = bg))
+        round(gr_num / bg_num, 2)
+      },
+      result_df$GeneRatio,
+      result_df$BgRatio
+    )
+    
+    result_df <- result_df[result_df$p.adjust < CONFIG$thresholds$padj, ]
+    result_df[order(result_df$Count, decreasing = (direction == "up")), ]
+  }
+  
+  results <- list()
+  for(group in unique(deg_df$group)) {
+    de_subset <- deg_df[deg_df$group == group & 
+                         abs(deg_df$avg_log2FC) > CONFIG$thresholds$lfc & 
+                         deg_df$p_val_adj < CONFIG$thresholds$padj, ]
+    
+    up_genes <- de_subset$gene_id[de_subset$avg_log2FC > 0]
+    down_genes <- de_subset$gene_id[de_subset$avg_log2FC < 0]
+    
+    go_up <- process_group(up_genes, sapply(strsplit(group, '_vs_'), `[`, 1), "up")
+    go_down <- process_group(down_genes, sapply(strsplit(group, '_vs_'), `[`, 2), "down")
+    
+    results[[group]] <- rbind(go_up, go_down)
+  }
+  
+  return(results)
+}
+
+#' GO bubble plot
+create_go_bubble_plot <- function(go_df, pathways, title = "") {
+  filtered_go <- go_df[go_df$Description %in% pathways, ]
+  filtered_go$Description <- factor(filtered_go$Description, levels = unique(pathways))
+  
+  ggplot(filtered_go, aes(x = stat, y = Description)) +
+    geom_point(aes(size = Count, color = p.adjust)) +
+    scale_color_gradient(low = 'red', high = 'blue') +
+    theme_bw() +
+    theme(
+      axis.text = element_text(colour = 'black', size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    ) +
+    labs(title = title)
+}
+
+#' GSVA
+perform_gsva_analysis <- function(seurat_obj, pathways, species = "human") {
+  source(CONFIG$paths$custom_func)
+  
+  # load GO data
+  go_data_path <- if(species == "human") CONFIG$paths$go_set_hg else CONFIG$paths$go_set_mm
+  load(go_data_path)
+  
+  # 
+  df <- findGO(pattern = paste(pathways, collapse = '|'), ont = 'BP') %>% as.data.frame()
+  df$ID <- rownames(df)
+  df <- df[df$pathway %in% pathways, ]
+  
+  # extract GO sets
+  go_data <- map(df$ID, getGO)
+  valid_go <- keep(go_data, ~ length(.x[[1]]) >= CONFIG$thresholds$min_geneset_size)
+  
+  gene_list <- map(valid_go, ~ .x[[1]])
+  names(gene_list) <- map_chr(valid_go, ~ names(.x)[1])
+  
+  # pseudobulk
+  mtx <- PseudobulkExpression(
+    seurat_obj, 
+    group.by = 'orig.ident', 
+    layer = 'data', 
+    method = 'average'
+  )[[1]]
+  
+  # clean gene names
+  pattern <- if(species == "human") 'hg38-' else 'mm10-'
+  rownames(mtx) <- gsub(rownames(mtx), pattern = pattern, replacement = '')
+  
+  # GSVA
+  gsva_param <- GSVA::gsvaParam(as.matrix(mtx), geneSets = gene_list)
+  score_matrix <- GSVA::gsva(param = gsva_param)
+  
+  # clean rownames
+  rownames(score_matrix) <- gsub(pattern = '_', replacement = ' ', rownames(score_matrix))
+  
+  return(score_matrix)
+}
+
+#' GSVA heatmap
+create_gsva_heatmap <- function(score_matrix, filename, species = "human") {
+  breaks_seq <- seq(-1, 1, by = 0.1)
+  
+  pheatmap::pheatmap(
+    score_matrix,
+    scale = 'row',
+    color = colorRampPalette(c("blue", "white", "red"))(length(breaks_seq)),
+    breaks = breaks_seq,
+    clustering_method = 'ward.D',
+    show_colnames = TRUE,
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    cutree_cols = 4,
+    cutree_rows = 5,
+    legend_breaks = c(-1, -0.5, 0, 0.5, 1),
+    height = 10,
+    width = 7,
+    filename = file.path(CONFIG$paths$output_dir, filename)
+  )
+}
+
+# ==================== hg analysis ====================
+cat("Starting human data analysis...\n")
+
+# load data
+load(CONFIG$paths$input_data)
+human_deg <- readRDS(CONFIG$paths$deg_human)
+gsub(pattern = '-','_',human_deg$group) ->human_deg$group
+
+# 
+human_pathways_gsva <- c(
+  'cell−cell signaling by wnt', 'ossification', 'signal release',
+  'regulation of anatomical structure size', 'Wnt signaling pathway',
+  'response to metal ion', 'actin filament organization', 
+  'extracellular matrix organization', 'regulation of postsynaptic specialization assemblycell growth',
+  'regulation of angiogenesis', 'mesenchyme development', 'response to xenobiotic stimulus',
+  'axonogenesis', 'axon development', 'regulation of neurogenesis',
+  'epithelial cell development', 'neuron death', 'regulation of supramolecular fiber organization',
+  'cognition', 'axon guidance', 'organ growth', 'cell junction assembly',
+  'regulation of membrane potential', 'regulation of cell development',
+  'regulation of synapse structure or activity', 'urogenital system development',
+  'regionalization', 'pattern specification process', 'sensory system development',
+  'eye development', 'response to oxygen levels', 'NADH regeneration',
+  'epithelial cell proliferation', 'embryonic organ development', 'regulation of cell growth',
+  'mesenchymal cell differentiation', 'nucleotide metabolic process',
+  'ribonucleotide metabolic process', 'response to hypoxia', 'ATP metabolic process',
+  'neural tube development', 'cilium organization', 'tRNA aminoacylation',
+  'cilium assembly', 'amino acid activation', 'histone modification'
+)
+
+# GSVA
+cat("Performing human GSVA analysis...\n")
+human_gsva_scores <- perform_gsva_analysis(seurat_obj = hg, pathways = human_pathways_gsva, species = "human")
+create_gsva_heatmap(human_gsva_scores, "GSVA_go_hg_heatmap2.pdf", "human")
+
+# GO enrichment
+cat("Performing human GO enrichment analysis...\n")
+human_go_results <- perform_go_enrichment(human_deg, "human")
+
+# 
+human_bubble_pathways <- list(
+  recurrent_vs_primary = c(
+    'axon development', 'synapse organization', 'axonogenesis', 
+    'actin filament organization', 'cell growth', 'cell junction assembly',
+    'signal release', 'neuron death', 'regulation of neurogenesis',
+    'response to extracellular stimulus', 'positive regulation of cell projection organization',
+    'mesenchymal cell differentiation', 'mesenchyme development', 
+    'cell−cell signaling by wnt', 'regionalization', 'histone modification',
+    'pattern specification process', 'cilium organization'
+  ),
+  treated_recurrent_vs_recurrent = c(
+    'cellular amino acid metabolic process', 'tRNA aminoacylation', 
+    'amino acid activation', 'cilium movement', 'extracellular structure organization',
+    'regulation of angiogenesis', 'response to xenobiotic stimulus', 
+    'regulation of cell growth', 'epithelial cell proliferation', 
+    'response to metal ion', 'axonogenesis', 'ribonucleotide metabolic process',
+    'nucleotide metabolic process', 'axon development', 'response to hypoxia'
+  ),
+  treated_recurrent_vs_primary = c(
+    'axon development', 'axonogenesis', 'synapse organization', 
+    'cell junction assembly', 'actin filament organization', 'cell growth',
+    'signal release', 'axon guidance', 'cognition', 
+    'regulation of supramolecular fiber organization', 
+    'regulation of synapse structure or activity', 'learning or memory',
+    'eye development', 'epithelial cell proliferation', 'regionalization',
+    'extracellular matrix organization', 'ossification', 
+    'pattern specification process', 'embryonic organ development'
+  )
+)
+
+human_bubble_plots <- list()
+for(i in seq_along(human_bubble_pathways)) {
+  group_name <- names(human_bubble_pathways)[i]
+  human_bubble_plots[[i]] <- create_go_bubble_plot(
+    human_go_results[[group_name]], 
+    human_bubble_pathways[[group_name]],
+    paste("Human:", group_name)
+  )
+}
+
+# 
+pdf(file.path(CONFIG$paths$output_dir, "go_hg_bubleplot.pdf"), 
+    width = 5, height = 4, paper = 'a4')
+print(human_bubble_plots)
+dev.off()
+
+write.xlsx(
+  do.call(rbind, human_go_results), 
+  file.path(CONFIG$paths$output_dir, "tumor_GO_snrna.xlsx")
+)
+write.xlsx(
+  human_deg[abs(human_deg$avg_log2FC) > CONFIG$thresholds$lfc & 
+            human_deg$p_val_adj < CONFIG$thresholds$padj, ], 
+  file.path(CONFIG$paths$output_dir, "tumor_deg_snrna.xlsx")
+)
+
+# ==================== mm analysis ====================
+cat("Starting mouse data analysis...\n")
+
+# DEG
+mouse_comparisons <- list(
+  c('control39', 'before_treated'),
+  c('treated37', 'before_treated'), 
+  c('treated37', 'control39')
+)
+
+mouse_deg_list <- lapply(mouse_comparisons, function(comparison) {
+  deg_result <- FindMarkers(
+    exn, ident.1 = comparison[1], ident.2 = comparison[2],
+    group.by = 'orig.ident', min.pct = 0.05
+  )
+  
+  deg_result$gene <- gsub(rownames(deg_result), pattern = 'mm10-', replacement = '')
+  
+  gene_mapping <- bitr(
+    deg_result$gene, fromType = 'SYMBOL', toType = 'ENTREZID', 
+    OrgDb = 'org.Mm.eg.db'
+  )
+  
+  deg_result$gene_id <- gene_mapping[match(deg_result$gene, gene_mapping$SYMBOL), 'ENTREZID']
+  deg_result$group <- paste(comparison, collapse = '_vs_')
+  deg_result$rownames <- rownames(deg_result)
+  
+  return(deg_result)
+})
+
+mouse_deg_combined <- do.call(rbind, mouse_deg_list)
+mouse_deg_combined$group <- factor(
+  mouse_deg_combined$group,
+  levels = c('control39_vs_before_treated', 'treated37_vs_before_treated', 'treated37_vs_control39'),
+  labels = c('recurrent_vs_primary', 'treated_recurrent_vs_primary', 'treated_recurrent_vs_recurrent')
+)
+
+mouse_deg_filtered <- mouse_deg_combined[
+  abs(mouse_deg_combined$avg_log2FC) > CONFIG$thresholds$lfc & 
+  mouse_deg_combined$p_val_adj < CONFIG$thresholds$padj,
+]
+
+write.xlsx(
+  mouse_deg_filtered, 
+  file.path(CONFIG$paths$output_dir, "neuron_deg_snrna.xlsx")
+)
+
+# mm GO enrichment
+cat("Performing mouse GO enrichment analysis...\n")
+mouse_go_results <- perform_go_enrichment(mouse_deg_filtered, "mouse")
+
+# mm GSVA analysis
+mouse_pathways_gsva <- c(
+  'synapse organization', 'positive regulation of cell adhesion', 'cell junction assembly',
+  'positive regulation of cell projection organization', 'actin filament organization',
+  'extracellular matrix organization', 'regulation of inflammatory response',
+  'cellular calcium ion homeostasis', 'learning or memory', 'cognition',
+  'regulation of cell junction assembly', 'regulation of actin filament−based process',
+  'regulation of synapse organization', 'regulation of synapse structure or activity',
+  'dendrite development', 'regulation of synaptic plasticity', 'axonogenesis'
+) %>% unique()
+
+cat("Performing mouse GSVA analysis...\n")
+mouse_gsva_scores <- perform_gsva_analysis(exn, mouse_pathways_gsva, "mouse")
+create_gsva_heatmap(mouse_gsva_scores, "GSVA_go_mm_heatmap2.pdf", "mouse")
+
+# 
+write.xlsx(
+  do.call(rbind, mouse_go_results), 
+  file.path(CONFIG$paths$output_dir, "neuron_GO_snrna.xlsx")
+)
+
+cat("Analysis completed successfully!\n")
+```

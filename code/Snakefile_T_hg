@@ -1,0 +1,67 @@
+cell_ids = ['C1KO-1',
+            'C1KO-2',
+            'C1KO-3',
+            'C1V2TH-1',
+            'C1V2TH-2',
+            'C1V2TH-3']
+           
+ 
+star = '/home/pzz/STAR-2.7.10a/bin/Linux_x86_64_static/STAR'
+rsemcalculateexpression = "/mnt/raid62/pzz/package/rsem/RSEM-master/rsem-calculate-expression"
+
+
+
+rule all:
+	input:
+		expand("/home/pzz/project/c1ql1/c1ql1/data/hg_tumor/STAR/{label}_star_hybrid.bam",label=cell_ids),
+		expand("/home/pzz/project/c1ql1/c1ql1/data/rsem/hg_tumor/{label}.transcript.bam",label=cell_ids)
+		
+		
+		
+rule star_align:
+	input:
+		fq1 = "/home/pzz/project/c1ql1/c1ql1/cleandata/{label}_1.clean.fq.gz",
+		fq2 = "/home/pzz/project/c1ql1/c1ql1/cleandata/{label}_2.clean.fq.gz"
+	output:
+		bam = "/home/pzz/project/c1ql1/c1ql1/data/hg_tumor/STAR/{label}_star_hybrid.bam"
+	log:
+		out = "/home/pzz/project/c1ql1/c1ql1/data/log/STAR/hg_tumor/star_align.{label}.log",
+		err = "/home/pzz/project/c1ql1/c1ql1/data/log/STAR/hg_tumor/star_align.{label}.err"
+	params:
+		outprefix = "/home/pzz/project/c1ql1/c1ql1/data/hg_tumor/STAR/{label}.",
+		indexdir = "/mnt/raid61/Ref/HomSap/release101/STAR_2.7.7/"
+	shell:  
+		"""
+		{star} \
+		--genomeDir {params.indexdir} \
+		--outFileNamePrefix {params.outprefix} \
+		--readFilesIn {input.fq1} {input.fq2} \
+		--quantMode TranscriptomeSAM GeneCounts\
+		--readFilesCommand zcat \
+		--runThreadN 6 \
+		--outFilterScoreMinOverLread 0.33 \
+		--outFilterMatchNminOverLread 0.33 \
+		--outStd SAM \
+		--genomeLoad LoadAndKeep \
+		--outSAMunmapped Within | samtools view - -b -S -o {output.bam} 2> {log.err} 1> {log.out}
+		"""			
+		
+rule rsem:
+	input:
+		isobam = "/home/pzz/project/c1ql1/c1ql1/data/hg_tumor/STAR/{label}.Aligned.toTranscriptome.out.bam"
+	output:
+		bam  = "/home/pzz/project/c1ql1/c1ql1/data/rsem/hg_tumor/{label}.transcript.bam"
+	params:
+		prefix = '/home/pzz/project/c1ql1/c1ql1/data/rsem/hg_tumor/{label}',
+		rsemindex = "/mnt/raid62/pzz/ref/rsem_hg38/"
+	log:
+		out = "/home/pzz/project/c1ql1/c1ql1/data/log/rsem/hg_tumor/rsem.{label}.log",
+		err = "/home/pzz/project/c1ql1/c1ql1/data/log/rsem/hg_tumor/rsem.{label}.err"
+
+	shell:
+		"""
+		{rsemcalculateexpression} --strandedness reverse \
+		--paired-end --alignments --calc-pme --calc-ci --sort-bam-by-coordinate \
+		-p 4 {input.isobam} \
+		{params.rsemindex} {params.prefix} 2> {log.err} 1> {log.out}
+		"""		

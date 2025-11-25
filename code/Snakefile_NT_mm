@@ -1,0 +1,221 @@
+cell_ids = ['N+C1KO-1',
+           'N+C1KO-2',
+           'N+C1KO-3',
+           'N+C1V2TH-1',
+           'N+C1V2TH-2',
+           'N+C1V2TH-3']
+           
+SPECIES = "mm"   
+star = '/home/pzz/STAR-2.7.10a/bin/Linux_x86_64_static/STAR'
+sambamba = "/mnt/raid62/pzz/package/sambamba/sambamba"
+rsemcalculateexpression = "/mnt/raid62/pzz/package/rsem/RSEM-master/rsem-calculate-expression"
+
+
+
+rule all:
+	input:
+		# expand("/home/pzz/project/c1ql1/data/STAR/mm/{label}_star_hybrid.bam",label=cell_ids),
+		expand("/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.paired.bam",label = cell_ids,species=SPECIES),
+		expand("/home/pzz/project/c1ql1/data/{species}/{label}.r2.fq.gz",label=cell_ids,species=SPECIES),
+		expand("/home/pzz/project/c1ql1/data/final/{species}/{label}.bam",species=SPECIES,label=cell_ids),
+		expand("/home/pzz/project/c1ql1/data/rsem/{species}/{label}.transcript.bam",species=SPECIES,label=cell_ids)
+		
+		
+		
+#rule star_align:
+#	input:
+#		fq1 = "/home/pzz/project/c1ql1/cleandata/{label}_1.clean.fq.gz",
+#		fq2 = "/home/pzz/project/c1ql1/cleandata/{label}_2.clean.fq.gz"
+#	output:
+#		bam = "/home/pzz/project/c1ql1/data/STAR/mm/{label}_star_hybrid.bam"
+#	log:
+#		out = "/home/pzz/project/c1ql1/data/log/STAR/mm/star_align.{label}.log",
+#		err = "/home/pzz/project/c1ql1/data/log/STAR/mm/star_align.{label}.err"
+#	params:
+#		outprefix = "/home/pzz/project/c1ql1/data/STAR/mm/{label}.",
+#		indexdir = "/mnt/raid61/Ref/MusMus/release101/2.7.10b/"
+#	shell:  
+#		"""
+#		{star} \
+#		--genomeDir {params.indexdir} \
+#		--outFileNamePrefix {params.outprefix} \
+#		--readFilesIn {input.fq1} {input.fq2} \
+#		--readFilesCommand zcat \
+#		--runThreadN 6 \
+#		--outFilterScoreMinOverLread 0.33 \
+#		--outFilterMatchNminOverLread 0.33 \
+#		--outStd SAM \
+#		--genomeLoad LoadAndKeep \
+#		--outSAMunmapped Within | samtools view - -b -S -o {output.bam} 2> {log.err} 1> {log.out}
+#		"""		
+		
+		
+		
+rule fetch_species:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/STAR/{label}_star_hybrid.bam"
+	output:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}_star_{species}.bam"
+		
+	log:
+		err = "/home/pzz/project/c1ql1/data/log/{species}/{label}_fetch_{species}.err"
+	params:
+		genome = "/mnt/raid62/pzz/ref/mm/Mus_musculus.GRCm38.dna.primary_assembly.fa",
+		bed = "/mnt/raid61/Ref/HomSap_MusMus/release101/hg38_and_mm10/fasta/mm10.bed"
+	shell:
+		"""
+		samtools view -hL {params.bed} {input.bam}|samtools view -bt {params.genome} - > {output.bam} 2> {log.err}
+		"""
+		
+rule sortByname:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}_star_{species}.bam"
+	output:
+		bam = temp("/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sortByname.bam")
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/{species}/{label}.sortByname.log",
+		err = "/home/pzz/project/c1ql1/data/{species}/{label}.sortByname.err"
+
+	shell:
+		"""
+		{sambamba} sort -l 0 -t 8 -n --tmpdir ./tmp -o {output.bam} {input.bam} 2> {log.err} 1> {log.out}
+		"""
+
+rule fixmate:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sortByname.bam"
+	output:
+		bam = temp("/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sortByname.fixmate.bam")
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/{species}/{label}.fixmate.log",
+		err = "/home/pzz/project/c1ql1/data/log/{species}/{label}.fixmate.err"
+	shell:
+		"""
+		samtools view -F 256 -bh {input.bam} | samtools fixmate - {output.bam} 2> {log.err} 1> {log.out}
+		"""
+
+rule sort:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sortByname.fixmate.bam"
+	output:
+		bam = temp("/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.bam")
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/{species}/sort.{label}.log",
+		err = "/home/pzz/project/c1ql1/data/log/{species}/sort.{label}.err"
+
+	shell:
+		"""
+		{sambamba} sort -l 0 -t 8 --tmpdir ./tmp -o {output.bam} {input.bam} 2> {log.err} 1> {log.out}
+		"""
+rule fetch_paired:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.bam"
+	output:
+		bam1 = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.unpaired.bam",
+		bam2 = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.paired.bam"
+	log:
+		err = "/home/pzz/project/c1ql1/data/log/{species}/{label}.fetch_paired.err"
+	shell:
+		"""
+		samtools view -F 1 -bh {input.bam} > {output.bam1} 2> {log.err}
+		samtools view -f 1 -bh {input.bam} > {output.bam2} 2> {log.err}
+		"""
+		
+		
+		
+rule indexbam:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.paired.bam"
+	output:
+		bai = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.paired.bam.bai"
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/{species}/indexbam.{label}.log",
+		err = "/home/pzz/project/c1ql1/data/log/{species}/indexbam.{label}.err"
+	shell:
+		"""
+		samtools index {input.bam} 2> {log.err} 1> {log.out}
+		"""
+
+rule bam2fastq:
+	input:
+		bam = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.paired.bam",
+		bai = "/home/pzz/project/c1ql1/data/{species}/{label}.star_{species}.sort.fixmate.paired.bam.bai"
+	output:
+		fq1 = "/home/pzz/project/c1ql1/data/{species}/{label}.r1.fq.gz",
+		fq2 = "/home/pzz/project/c1ql1/data/{species}/{label}.r2.fq.gz"
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/{species}/bam2fastq.{label}.log",
+		err = "/home/pzz/project/c1ql1/data/log/{species}/bam2fastq.{label}.err"
+	shell:
+		"""
+		java -Xmx4g -jar /mnt/raid/huangzongyao/software/biosoft/picard/picard.jar SamToFastq INPUT={input.bam} FASTQ={output.fq1} SECOND_END_FASTQ={output.fq2} 2> {log.err} 1> {log.out}
+		"""		
+		
+		
+		
+		
+		
+		
+rule star_realign:
+	input:
+		fq1 = "/home/pzz/project/c1ql1/data/{species}/{label}.r1.fq.gz",
+		fq2 = "/home/pzz/project/c1ql1/data/{species}/{label}.r2.fq.gz"
+	output:
+		bam = "/home/pzz/project/c1ql1/data/final/{species}/{label}.bam",
+		isobam = "/home/pzz/project/c1ql1/data/final/{species}/{label}.Aligned.toTranscriptome.out.bam"
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/final/{species}/star_realign.{label}.log",
+		err = "/home/pzz/project/c1ql1/data/log/final/{species}/star_realign.{label}.err"
+	params:
+		# prefix = '/home/pzz/project/c1ql1/data/final/{species}/{label}.',
+		# hgindex = "/mnt/raid61/Ref/MusMus/release101/2.7.10b/"
+		prefix = '/home/pzz/project/c1ql1/data/final/{species}/{label}.',
+		hgindex = "/mnt/raid61/Ref/MusMus/release101/2.7.10b/"
+	shell:
+		"""
+		/home/pzz/STAR-2.7.10a/bin/Linux_x86_64_static/STAR \
+		--genomeDir {params.hgindex} \
+		--outFileNamePrefix {params.prefix} \
+		--readFilesIn {input.fq1} {input.fq2} \
+		--quantMode TranscriptomeSAM GeneCounts\
+		--readFilesCommand zcat \
+		--chimSegmentMin 18 \
+		--chimScoreMin 12 \
+		--runThreadN 6 \
+		--outFilterMultimapNmax 20 \
+		--outFilterMismatchNoverLmax 0.04 \
+		--outFilterScoreMinOverLread 0.33 \
+		--outFilterMatchNminOverLread 0.33 \
+		--outFilterIntronMotifs RemoveNoncanonicalUnannotated \
+		--alignIntronMax 200000 \
+		--outSAMstrandField intronMotif \
+		--chimJunctionOverhangMin 12 \
+		--outSJfilterOverhangMin 12 12 12 12 \
+		--outSJfilterCountUniqueMin 1 1 1 1 \
+		--outSJfilterCountTotalMin 1 1 1 1 \
+		--outStd SAM \
+		--outSAMunmapped Within | samtools view - -b -S -o {output.bam} 2> {log.err} 1> {log.out}
+		"""
+		# --genomeLoad LoadAndKeep \
+		
+
+
+rule rsem:
+	input:
+		isobam = "/home/pzz/project/c1ql1/data/final/{species}/{label}.Aligned.toTranscriptome.out.bam"
+	output:
+		bam  = "/home/pzz/project/c1ql1/data/rsem/{species}/{label}.transcript.bam"
+	params:
+		prefix = '/home/pzz/project/c1ql1/data/rsem/{species}/{label}',
+		rsemindex = "/mnt/raid62/pzz/ref/mm/rsem_mm/"
+	log:
+		out = "/home/pzz/project/c1ql1/data/log/rsem/{species}/rsem.{label}.log",
+		err = "/home/pzz/project/c1ql1/data/log/rsem/{species}/rsem.{label}.err"
+
+	shell:
+		"""
+		{rsemcalculateexpression} --strandedness none \
+		--paired-end --alignments --calc-pme --calc-ci --sort-bam-by-coordinate \
+		-p 4 {input.isobam} \
+		{params.rsemindex} {params.prefix} 2> {log.err} 1> {log.out}
+		"""		

@@ -1,0 +1,420 @@
+---
+title: "Identify Curry et al. spiking cell"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+
+
+
+```{r}
+library(scramv2)
+library(Seurat)
+library(harmony)
+library(SeuratDisk)
+library(purrr)
+library(ggplot2)
+library(ggpubr)
+
+
+source('/mnt/raid62/pzz/always_func/read10x_file.R')
+
+setwd('/mnt/raid61/public_data/Curry_etal_2024_CancerCell/')
+
+# Define sample IDs
+sample_ids <- c('OG-02_CO', 'OG-03_LE', 'OG-03_CO', 
+                'GBM-05_LE', 'GBM-06_CO', 'GBM-07_CO')
+
+# Function to read and process individual samples
+read_sample <- function(sample_id) {
+  tryCatch({
+    # Find matching files
+    files <- grep(pattern = sample_id, dir(), value = TRUE)
+    if (length(files) < 3) {
+      stop(paste("Incomplete files for sample:", sample_id))
+    }
+    
+    # Read 10X data
+    obj <- Read10X_files(
+      barcode = files[1],
+      gene = files[2], 
+      mtx = files[3]
+    )
+    
+    # Create Seurat object and add metadata
+    obj <- CreateSeuratObject(obj)
+    obj$sample <- sample_id
+    obj$sample_id <- sample_id  # Redundant but clearer
+    
+    return(obj)
+  }, error = function(e) {
+    warning(paste("Failed to process sample", sample_id, ":", e$message))
+    return(NULL)
+  })
+}
+
+# Read all samples with progress indication
+message("Reading sample data...")
+obj_list <- map(sample_ids, read_sample)
+
+# Remove failed samples
+obj_list <- obj_list[!sapply(obj_list, is.null)]
+if (length(obj_list) == 0) stop("No samples were successfully loaded")
+
+# Merge all samples
+message("Merging samples...")
+dat <- merge(obj_list[[1]], obj_list[-1])
+
+# Clean up to save memory
+rm(obj_list)
+gc()
+
+# Quality control
+message("Performing quality control...")
+dat$percent.mt <- PercentageFeatureSet(dat, pattern = '^MT-')
+
+qc_cells <- which(
+  dat$nFeature_RNA > 200 &
+    dat$nFeature_RNA < 5000 &
+    dat$percent.mt < 10
+)
+
+if (length(qc_cells) == 0) stop("No cells passed quality control")
+
+dat <- dat[, qc_cells]
+
+# Standard preprocessing
+message("Preprocessing data...")
+dat <- NormalizeData(dat, verbose = FALSE)
+dat <- FindVariableFeatures(dat, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+dat <- ScaleData(dat, features = VariableFeatures(dat), verbose = FALSE)
+
+# PCA
+message("Running PCA...")
+dat <- RunPCA(dat, 
+              npcs = 50, 
+              features = VariableFeatures(dat),
+              verbose = FALSE)
+
+# Harmony integration
+message("Running Harmony integration...")
+dat <- RunHarmony(
+  dat,
+  group.by.vars = 'sample',
+  dims.use = 1:50,
+  plot_convergence = FALSE,
+  max.iter.cluster = 100,
+  nclust = 100,
+  verbose = FALSE
+)
+
+# Clustering and UMAP
+message("Performing clustering...")
+dat <- FindNeighbors(
+  dat,
+  reduction = "harmony",
+  dims = 1:20,
+  verbose = FALSE
+)
+
+dat <- FindClusters(
+  dat,
+  reduction = "harmony",
+  resolution = 1.5,
+  verbose = FALSE
+)
+
+message("Running UMAP...")
+dat <- RunUMAP(
+  dat,
+  reduction = "harmony",
+  dims = 1:40,
+  reduction.name = "harmony_umap",
+  verbose = FALSE
+)
+
+# Prepare object for export
+message("Preparing data for export...")
+meta <- dat@meta.data
+dat <- JoinLayers(dat)
+mtx <- GetAssayData(dat, layer = 'counts')
+
+# Create new object with counts and metadata
+obj <- CreateSeuratObject(mtx, meta.data = meta)
+
+# Ensure directory exists
+if (!dir.exists('out')) dir.create('out', recursive = TRUE)
+
+# Save in multiple formats
+message("Saving data...")
+SaveH5Seurat(obj, filename = 'out/adata.h5Seurat', overwrite = TRUE)
+Convert('out/adata.h5Seurat', dest = "h5ad", overwrite = TRUE)
+saveRDS(dat, file = 'out/seurat_obj.Rds')
+
+message("Processing completed successfully!")
+
+
+```
+
+
+```{r}
+dat <- readRDS('seurat_obj.Rds')
+# dat <- dat[,which(dat@meta.data$harmony_clusters %in% c(4,5,8,9,10,13,12,18))]
+
+scram_obj <-
+  CreateSCRAMObject(
+    seurat_obj = dat,
+    organism = "human",
+    min_support = 0.1,
+    max_set_size = 50
+  )
+
+set <- c(
+  "aldinger",
+  "allen_class_label_main",
+  "allen_neurons_only",
+  "bhaduri_withAge",
+  "codex",
+  "dirks_primary_gbm_combined",
+  "hpa_brain_simple",
+  "suva_idh_a_o",
+  "suva"
+  ,
+  "TissueImmune"
+)
+
+# set <- gsub(pattern = '_neuralNetwork', replacement = '', gsub(pattern = '041524_glioma_',replacement = '',dir("/mnt/raid61/public_data/Curry_etal_2024_CancerCell/out/")))
+# set <- set[-c(8,12,13,14)]
+
+scram_obj <-
+  createCellTypeMatrix (
+    object = scram_obj,
+    nn_path = "/mnt/raid61/public_data/Curry_etal_2024_CancerCell/out/041524_glioma_suva_idh_a_o_hpa_brain_simple_allen_class_label_main_allen_neurons_only_TissueImmune_aldinger_codex_suva_bhaduri_withAge_dirks_primary_gbm_combined_multipleNeuralNetworks/",
+    prob_thr = 0.9,
+    refs = set,
+    run = "041524_glioma",
+    pretrained = T
+  )
+
+saveRDS(scram_obj,
+        '/mnt/raid61/public_data/Curry_etal_2024_CancerCell/scram_obj.Rds')
+
+# project <- "Glioma"
+# scram_obj <- runCASPER_Bulk_Scell(object=scram_obj, sampleCol="sample", project = 'out')
+source('Improved_function.R')
+scram_obj <- readRDS('scram_obj.Rds')
+
+# library(curl)
+# handle <- new_handle(timeout = 30)
+
+scram_obj <-
+  runCASPER_Bulk_Scell_new(object = scram_obj,
+                           sampleCol = "sample",
+                           project = 'out')
+
+
+load("cnv_casper/out_SCELL_finalChrMat_thr_1.rda")
+finalChrMat_bulk <- finalChrMat
+scram_obj <-
+  runFinalTumorAnnotation(
+    object = scram_obj,
+    loadNumbat = F,
+    loadCasper = T,
+    finalChrMat_bulk = finalChrMat_bulk,
+    loadXCVATR = F,
+    sampleCol = "sample",
+    project = "out",
+    model_genes = c("PDGFRA" , "EGFR"  , "SOX2")
+  )
+
+
+scram_obj <- runSCRAM (object = scram_obj)
+writeSCRAMresults(object = scram_obj, 'GBM')
+
+
+```
+
+
+```{python}
+# <path_to_scripts_folder>/run_conversion.sh  glioma_seuratObj.rda  ./
+  
+  python3 nn_classifier_pretrained.py 041524_glioma  ./adata.h5ad --s --normalize_test 
+```
+
+
+```{r}
+scram_obj@seurat_obj@meta.data$chr1p <-
+  finalChrMat_bulk['1p', ] %>% as.numeric()
+scram_obj@seurat_obj@meta.data$chr7p <-
+  finalChrMat_bulk['7p', ] %>% as.numeric()
+
+# load('cnv_casper/out_SCELL_amp.rda')
+# scramv2::plotUMAPCellTypePerCluster(scram_obj,project = 'out')
+
+
+saveRDS(scram_obj, 'scram_obj.Rds')
+```
+
+
+```{r}
+dat <- scram_obj@seurat_obj
+score_list <- lapply(scram_obj@results_list, function(x) {
+  ob <- x
+  rownames(ob) <- ob$cells
+  ob <- ob[, -grep('cells|_cluster$|_clusterScore$', colnames(ob))]
+  ob
+})
+score <- do.call(cbind, score_list)
+score <- t(score) %>% as.matrix()
+
+score <- score[-grep(pattern = 'TissueImmune',rownames(score)),]
+
+dat[["SCRAM_probabilities"]] <-
+  CreateAssayObject(counts = as.matrix(score))
+DefaultAssay(dat) <- "SCRAM_probabilities"
+
+
+df <- table(dat@meta.data$sample) %>% as.data.frame()
+library(ggpubr)
+
+
+## tab sample
+df$type <- rep(c('IDHwt','IDHmut'), each = 3)
+
+ggbarplot(df, x = 'Var1', y = 'Freq', fill = 'type',label = T) + theme_pubclean() + 
+  theme(axis.text.x = element_text(colour = 'black',size = 12,hjust = 1,vjust = 1,angle = 45))
+
+
+
+
+DimPlot(dat,label = T)
+dat@meta.data[which(dat@meta.data$sample %in% c("GBM-05_LE", "GBM-06_CO", "GBM-07_CO")),'type'] <- 'IDHwt'
+dat@meta.data[which(dat@meta.data$sample %in% c("OG-02_CO"  ,"OG-03_LE" , "OG-03_CO")),'type'] <- 'IDHmut'
+
+DimPlot(dat,label = T,split.by = 'type')
+
+obj <-
+  dat[, which(dat@meta.data$harmony_clusters %in% c(4,18,14,24,12,35,19,15,10,17,28,29))]
+
+# obj <- ScaleData(obj, assay = 'SCRAM_probabilities')
+# obj <-
+#   RunPCA(obj,
+#          npcs = 50,
+#          features = rownames(obj),
+#          verbose = F)
+obj <- RunUMAP(obj, features = rownames(obj),n.neighbors = 40)
+obj <- RunTSNE(obj, features = rownames(obj))
+
+# 构建邻居关系并进行聚类
+obj <- FindNeighbors(obj , features = rownames(obj),verbose = F,graph.name = 'RNA_snn2')
+obj <- FindClusters(obj,resolution = 0.5,verbose = F,graph.name = 'RNA_snn2')
+
+obj@meta.data[which(obj@meta.data$sample %in% c("OG-02_CO" , "OG-03_LE" , "OG-03_CO")),'type'] <- 'IDHmut'
+obj@meta.data[which(obj@meta.data$sample %in% c("GBM-05_LE" ,"GBM-06_CO", "GBM-07_CO")),'type'] <- 'IDHwt'
+
+
+
+obj@meta.data <- cbind(obj@meta.data, t(score[,match(rownames(obj@meta.data), colnames(score))]))
+
+
+p <- lapply(grep(pattern = 'OPC|GABA', colnames(obj@meta.data),value = T), function(x){
+  FeaturePlot(obj, x, order = T, reduction = 'tsne')
+})
+
+scCustomize::Clustered_DotPlot(obj, features = grep(pattern = 'OPC|GABA', colnames(obj@meta.data),value = T))
+
+
+
+source('/mnt/raid62/pzz/always_func/Dotplot.R')
+source('/mnt/raid62/pzz/always_func/color.R')
+source('/mnt/raid62/pzz/always_func/volcano_personal.R')
+
+
+
+
+## Anno
+obj@meta.data[grepl(pattern = 'OPC.*tumor|tumor.*OPC|OPC.*GSC|GSC*OPC|oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation)  &
+                grepl(pattern = 'GABA.*tumor|tumor.*GABA|GABA.*GSC|GSC*GABA', obj@meta.data$cellclass_annotation), 'Annotation'] <-
+  obj@meta.data$cellclass_annotation[grepl(pattern = 'OPC.*tumor|tumor.*OPC|OPC.*GSC|GSC*OPC|oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation) &
+                                       grepl(pattern = 'GABA.*tumor|tumor.*GABA|GABA.*GSC|GSC*GABA', obj@meta.data$cellclass_annotation)]
+# obj@meta.data[grepl(pattern = 'oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation), 'Annotation'] <-
+#   obj@meta.data$cellclass_annotation[grepl(pattern = 'oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation)]
+
+mut <- obj[,which(obj@meta.data$type == 'IDHmut')]
+wt <- obj[,which(obj@meta.data$type == 'IDHwt')]
+
+source('/mnt/raid62/pzz/always_func/Vlnplot.R')
+
+mut@meta.data[which(!is.na(mut@meta.data$Annotation)),'group'] <- 'HC'
+mut@meta.data[which(is.na(mut@meta.data$Annotation)),'group'] <- 'other'
+wt@meta.data[which(!is.na(wt@meta.data$Annotation)),'group'] <- 'HC'
+wt@meta.data[which(is.na(wt@meta.data$Annotation)),'group'] <- 'other'
+
+individual_vln(mut, features = 'C1QL1', group = 'group',  my_comparation = list(c('HC','other')),layer = 'data', ylims = 5)|individual_vln(wt, features = 'C1QL1', group = 'group',  my_comparation = list(c('HC','other')),layer = 'data', ylims = 6)
+
+
+deg2 <-
+  FindMarkers(
+    obj,
+    ident.1 = rownames(obj@meta.data[which(!is.na(obj@meta.data$Annotation) & obj@meta.data$type == 'IDHwt'), ]),
+    ident.2 = rownames(obj@meta.data[which(is.na(obj@meta.data$Annotation) & obj@meta.data$type == 'IDHwt'), ]),
+    logfc.threshold = 0.2,
+    min.pct = 0.1
+  )
+deg2$gene <- rownames(deg2)
+
+
+
+
+obj@meta.data <- cbind(obj@meta.data, t(GetAssayData(obj, assay = 'SCRAM_probabilities',layer = 'counts')))
+# personal_dot(
+#   obj = obj,
+#   features =  grep(pattern = 'OPC|GABA', rownames(dat), value = T),
+#   group = 'seurat_clusters',color = cList[[1]]
+# ) + theme(axis.text.x = element_text(hjust = 1,vjust = 1,angle = 45))
+# 
+
+obj@meta.data$cellclass_annotation
+
+
+
+gene <- list(
+  'GABA metabolism' = 'GAD1',
+  'GABA metabolism' = 'ABAT',
+  'GABA receptor' = 'GABBR1',
+  'GABA receptor' = 'GABRB3',
+  'OPC' = 'PDGFRA',
+  'OPC' = 'OLIG2'
+)
+
+p1 <- DimPlot(obj,reduction = 'tsne',label = T)
+p2 <- DimPlot(obj,reduction = 'tsne',label = T,group.by = 'chr1p')
+p3 <- DimPlot(obj,reduction = 'tsne',label = T,group.by = 'chr7p')
+p4 <- DimPlot(obj,reduction = 'tsne',label = T,group.by = 'type')
+
+a <- Seurat::AverageExpression(obj,assays = 'SCRAM_probabilities',group.by = 'seurat_clusters', features = grep(pattern = 'OPC|GABA', rownames(dat), value = T),layer = 'counts')[[1]]
+a <- a[c(grep(pattern = 'OPC', rownames(a)),grep(pattern = 'GABA', rownames(a))),]
+
+deg <- FindMarkers(obj,ident.1 = 3,ident.2 = c(11,12),logfc.threshold = 0.2, min.pct = 0.2)
+deg$gene <- rownames(deg)
+volcano_personal(deg,x = 'avg_log2FC', y = 'p_val_adj', xlim = 0.5,ylim = 0.01,lab = 'C1QL1')
+
+
+obj@meta.data[which(!is.na(obj@meta.data$Annotation) & obj@meta.data$type == 'IDHmut'),'subtype'] <- 'IDHmut_HC'
+obj@meta.data[which(!is.na(obj@meta.data$Annotation) & obj@meta.data$type == 'IDHwt'),'subtype'] <- 'IDHwt_HC'
+
+
+pdf('/mnt/raid62/pzz/ding/out/c1/out/15IDH_mut_GABAOPC_ann_C1.pdf',paper = 'a4r',width = 10,height = 8)
+pheatmap::pheatmap(a,cluster_rows = F)
+anno_dot(obj = obj,features = gene,angle = 45,color = cList[[1]],group = 'seurat_clusters')
+cowplot::plot_grid(p1,p2,p3,p4,ncol = 2)
+DimPlot(obj,reduction = 'tsne', group.by = 'subtype',order = T,pt.size = 0.5)
+volcano_personal(deg,x = 'avg_log2FC', y = 'p_val_adj', xlim = 0.5,ylim = 0.01,lab = 'C1QL1')
+volcano_personal(deg2,x = 'avg_log2FC', y = 'p_val_adj', xlim = 0.5,ylim = 0.01,lab = 'C1QL1')
+dev.off()
+
+```
+

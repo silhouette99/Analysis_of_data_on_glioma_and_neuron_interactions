@@ -1,0 +1,111 @@
+---
+title: "Spatial transcriptomic data"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+all_nc_data <- readRDS("/mnt/raid/huangzongyao/project/huangzongyao/visium_project/visium_paper/NC_modify/module_analysis/Banksy/all_RCTD_module_se_with_id_4_modify_Banksy_figshare.RDS")
+gbm <- all_nc_data[, grep('GBM', all_nc_data@meta.data$group)]
+
+gbm@meta.data$module_id_Banksy <- factor(
+  gbm@meta.data$module_id_Banksy,
+  labels = c('Tumor Core', 'Vascular niche','Invasive niche','Hypoxic niche')
+)
+
+seu_spd <- readRDS("/mnt/raid62/zhouran/project/2021-1017-spatial/22.replot_all_plots/10.Ravi_data_v2/seu_spd.Rds")
+source('/mnt/raid62/pzz/always_func/Vlnplot.R')
+
+###############################
+## Function for 3-panel plot ##
+###############################
+plot_spatial_triplet <- function(obj, feature = "C1QL1", pt.factor = 500, crop = FALSE, group = "segmentation") {
+  p1 <- SpatialDimPlot(obj, pt.size.factor = 0, crop = crop, group.by = group) + NoLegend()
+  p2 <- SpatialDimPlot(obj, pt.size.factor = pt.factor, crop = crop, group.by = group)
+  p3 <- SpatialFeaturePlot(obj, feature, pt.size.factor = pt.factor, crop = crop, slot = "scale.data")
+  p1 | p2 | p3
+}
+
+###################################
+## ------------- PART 1 ---------- 
+## Ravi spatial datasets 
+###################################
+
+slice_ids <- c(2, 4, 5, 6, 7)
+pt_sizes  <- c(500, 200, 200, 200, 2000)
+
+pdf('/mnt/raid62/pzz/ding/out_final_c1/Spatial_plot_C1.pdf', width = 20, height = 7)
+
+for (i in seq_along(slice_ids)) {
+  print(plot_spatial_triplet(
+    seu_spd[[slice_ids[i]]],
+    pt.factor = pt_sizes[i],
+    crop = FALSE
+  ))
+}
+
+###################################
+## Banksy GBM slices 
+###################################
+
+banksy_slices <- c("slice1.5", "slice1.6", "slice1.7", "slice1.8", "slice1.9")
+banksy_pts    <- c(5000, 5000, 500, 50, 70)
+
+for (i in seq_along(banksy_slices)) {
+  p1 <- SpatialDimPlot(gbm, group.by = "module_id_Banksy", images = banksy_slices[i],
+                       crop = FALSE, pt.size.factor = 0) + NoLegend()
+  p2 <- SpatialDimPlot(gbm, group.by = "module_id_Banksy", images = banksy_slices[i],
+                       crop = FALSE, pt.size.factor = banksy_pts[i])
+  p3 <- SpatialFeaturePlot(gbm, "C1QL1", images = banksy_slices[i],
+                           pt.size.factor = banksy_pts[i], crop = FALSE, slot = "scale.data")
+  print(p1 | p2 | p3)
+}
+
+dev.off()
+
+
+###################################
+## ------------- PART 2 ---------- 
+## BNI23 + HG data 
+###################################
+
+bni23 <- readRDS('/mnt/raid62/zhouran/project/2021-1017-spatial/27.BNI23_SRT/02.hg38/bni23_hg.Rds')
+hg_dat <- readRDS('/mnt/raid62/zhouran/project/2021-1017-spatial/01.hg38/dat.Rds')
+
+pdf('/mnt/raid62/pzz/ding/out_final_c1/module_Spatial_plot_C1.pdf', width = 15, height = 7)
+
+hg_list <- list(
+  End2_IL = hg_dat$End2_IL,
+  End1_IL = hg_dat$End1_IL,
+  T2_IL   = hg_dat$T2_IL,
+  BNI23   = bni23
+)
+
+hg_pt <- c(30, 30, 30, 50)
+
+for (i in seq_along(hg_list)) {
+  obj <- hg_list[[i]]
+  slice_name <- names(hg_list)[i]
+  
+  p1 <- SpatialDimPlot(obj, crop = FALSE, pt.size.factor = 0) + 
+    NoLegend() + labs(title = slice_name)
+  
+  p2 <- SpatialFeaturePlot(obj, "C1QL1", 
+                           crop = FALSE, pt.size.factor = hg_pt[i],
+                           slot = "scale.data")
+  
+  print(p1 | p2)
+}
+
+dev.off()
+
+```

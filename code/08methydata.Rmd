@@ -1,0 +1,350 @@
+---
+title: "bulk RNA-seq"
+author: "PZZ"
+affiliation: First Author's Affiliation
+date: "`r Sys.Date()`"
+output:
+  html_document
+---
+
+## house data
+```{r}
+library(sesameData)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(methyLImp2)
+library(SummarizedExperiment)
+library(BiocParallel)
+
+source('/mnt/raid62/pzz/always_func/sesame_c_to_r.R')
+
+# Load sample 1 IDAT data
+sset1 <- sesame::readIDATpair("/mnt/raid62/pzz/ding/935k/idat/209227570031_R05C01")
+
+# Load sample 2 IDAT data  
+sset2 <- sesame::readIDATpair("/mnt/raid62/pzz/ding/935k/idat/209227570031_R06C01")
+
+# Probe detection filtering (remove probes with detection p-value > 0.05)
+pvalue <- sesame::pOOBAH(sset1, return.pval = T)
+sset1$pvalue <- pvalue
+sset1 <- sesame::addMask(sset1, pvalue > 0.05)
+pvalue <- sesame::pOOBAH(sset2, return.pval = T)
+sset2$pvalue <- pvalue
+sset2 <- sesame::addMask(sset2, pvalue > 0.05)
+sset1 <- sset1[which(sset1$mask == F),]
+sset2 <- sset2[which(sset2$mask == F),]
+sset1 <- sset1[sset1$Probe_ID %in% intersect(sset1$Probe_ID, sset2$Probe_ID),]
+sset2 <- sset2[sset2$Probe_ID %in% intersect(sset1$Probe_ID, sset2$Probe_ID),]
+
+# Calculate QC statistics for both samples
+qc1 <- sesameQC_calcStats(sset1)
+qc2 <- sesameQC_calcStats(sset2)
+
+print(qc1)
+print(qc2)
+
+# Get problematic probes to remove for EPICv2 platform
+dele_gene <- sesame::getMask(platform = "EPICv2")
+
+# Remove problematic probes
+sset1 <- sset1[!sset1$Probe_ID %in% dele_gene, ]
+sset2 <- sset2[!sset2$Probe_ID %in% dele_gene, ]
+
+# Background correction - plot before correction
+pdf('/mnt/raid62/pzz/ding/935k/out/plotIntensVsBetas_before.pdf', paper = 'a4')
+sesame::sesameQC_plotIntensVsBetas(sset1)
+sesame::sesameQC_plotIntensVsBetas(sset2)
+dev.off()
+
+# Apply background correction using NOOB method
+sset1 <- sesame::noob(sset1)
+sset2 <- sesame::noob(sset2)
+
+# Plot after background correction
+pdf('/mnt/raid62/pzz/ding/935k/out/plotIntensVsBetas_after.pdf', paper = 'a4')
+sesame::sesameQC_plotIntensVsBetas(sset1)
+sesame::sesameQC_plotIntensVsBetas(sset2)
+dev.off()
+
+# Dye bias correction - plot before correction
+pdf('/mnt/raid62/pzz/ding/935k/out/plotRedGrnQQ_before.pdf', paper = 'a4')
+sesame::sesameQC_plotRedGrnQQ(sset1)
+sesame::sesameQC_plotRedGrnQQ(sset2)
+dev.off()
+
+# Apply dye bias correction
+sset1 <- dyeBiasNL(sset1)
+sset2 <- dyeBiasNL(sset2)
+
+# Plot after dye bias correction
+pdf('/mnt/raid62/pzz/ding/935k/out/plotRedGrnQQ_after.pdf', paper = 'a4')
+sesame::sesameQC_plotRedGrnQQ(sset1)
+sesame::sesameQC_plotRedGrnQQ(sset2)
+dev.off()
+
+# Extract beta values from processed data
+beta1 <- sesame::getBetas(sset1)
+beta2 <- sesame::getBetas(sset2)
+
+# Create beta value matrix and remove NA values
+betas <- data.frame(sample1 = beta1, sample2 = beta2)
+betas <- betas[which(!is.na(betas$sample1) & !is.na(betas$sample2)),]
+colnames(betas) <- c('BNI23', 'BNI21')
+
+# Annotate probes with genomic information
+anno_probe <- sesameData::sesameData_annoProbes(platform = 'EPICv2', Probe_IDs = rownames(betas)) %>% as.data.frame()
+betas_ann <- cbind(betas, anno_probe)
+
+# Get additional annotation from Illumina annotation package
+anno <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19) %>% as.data.frame()
+betas_ann$probe <- sapply(strsplit(rownames(betas_ann), split = '_'), '[[', 1)
+
+# Merge with annotation data
+anno_beta <- cbind(betas_ann, anno[match(betas_ann$probe, rownames(anno)), ])
+
+# Save processed BNI array data
+save(betas, anno_beta, sset1, sset2, qc1, qc2, file = '/mnt/raid62/pzz/ding/935k/process_bni_array.Rdata')
+
+```
+
+## TCGA
+```{r}
+## TCGA Data Processing
+
+library(SummarizedExperiment)
+library(parallel)
+library(tibble)
+library(purrr)
+library(TCGAbiolinks)
+library(dplyr)
+
+source('/mnt/raid62/pzz/always_func/sesame_c_to_r.R')
+
+# Load all TCGA IDAT files in parallel
+sdfs <- mclapply(
+  sesame::searchIDATprefixes('/mnt/raid61/public_data/GBM_public_dataset/TCGA/Methylation/download/idat_files/'),
+  sesame::readIDATpair,
+  mc.cores = 2
+)
+
+# Get problematic probes for HM450 platform
+dele_gene <- sesame::getMask(platform = "HM450")
+
+# Process each TCGA sample: quality control, background correction, dye bias correction
+sdfs_list <- sdfs %>% imap(~ {
+  pvalue <- sesame::pOOBAH(.x, return.pval = T)
+  sset1 <- .x
+  sset1$pvalue <- pvalue
+  sset1 <- sesame::addMask(sset1, pvalue > 0.05)
+  
+  # Remove problematic probes
+  sset1 <- sset1[!sset1$Probe_ID %in% dele_gene,]
+  
+  # Apply background correction
+  sset1 <- sesame::noob(sset1)
+  
+  # Apply dye bias correction
+  sset1 <- dyeBiasNL(sset1)
+  
+  # Extract beta values
+  beta1 <- sesame::getBetas(sset1)
+  
+  list('sset' = sset1, 'beta' = beta1)
+}) %>% set_names(names(sdfs))
+
+# Save processed TCGA data
+save(sdfs_list, sdfs, file = '/mnt/raid61/public_data/GBM_public_dataset/TCGA/Methylation/sdfs_list.Rdata')
+
+# Create beta value matrix from all samples
+mtx <- lapply(sdfs_list, function(x) {
+  x$beta
+}) %>% do.call(cbind, .)
+colnames(mtx) <- sapply(strsplit(colnames(mtx), split = '_'), '[[', 1)
+
+# Create mask matrix indicating failed probes
+mask <- lapply(sdfs_list, function(x) {
+  x$sset$mask
+}) %>% do.call(cbind, .)
+colnames(mask) <- sapply(strsplit(colnames(mask), split = '_'), '[[', 1)
+rownames(mask) <- rownames(mtx)
+
+# Filter probes: keep only probes with <=5% failure rate across samples
+mask <- mask[names(which(round(100 * rowSums(mask) / ncol(mask), 3) <= 5)), ]
+mtx <- mtx[rownames(mask), ]
+
+# Filter probes with <=5% missing values
+mtx <- mtx[names(which(round(100*rowSums(is.na(mtx))/ncol(mtx),3) <=5)),]
+
+# Load and process sample metadata
+meta <- data.table::fread('/mnt/raid61/public_data/GBM_public_dataset/TCGA/Methylation/download/gdc_sample_sheet.2025-09-25.tsv') %>% 
+  as.data.frame() %>% 
+  arrange('Sample ID')
+meta$File <- sapply(strsplit(meta$`File Name`, split = '_noid_'), '[[', 1)
+
+# Match sample IDs with metadata
+colnames(mtx) <- meta[match(colnames(mtx), meta$File), 'Case ID']
+
+# Create SummarizedExperiment object for methylation data
+beta_SE <- SummarizedExperiment(
+  assays = SimpleList(beta = mtx),
+  colData = data.frame(sample = colnames(mtx), row.names = colnames(mtx))
+)
+
+# Perform methylation data imputation using methyLImp2
+time <- system.time(
+  beta_SE_imputed <- methyLImp2(
+    input = beta_SE,
+    type = "450K",
+    BPPARAM = SnowParam(exportglobals = FALSE),
+    minibatch_frac = 0.5
+  )
+)
+
+# Save imputed data
+save(beta_SE_imputed, mtx, file = '/mnt/raid61/public_data/GBM_public_dataset/TCGA/Methylation/methyLImp2_af_data.Rdata')
+
+```
+
+## merge & plot
+```{r}
+library(dplyr)
+library(tibble)
+library(purrr)
+library(ggplot2)
+library(sva)
+library(ConsensusClusterPlus)
+
+
+load('/mnt/raid61/public_data/GBM_public_dataset/TCGA/Methylation/methyLImp2_af_data.Rdata')
+load('/mnt/raid62/pzz/ding/935k/process_bni_array.Rdata')
+
+# Extract imputed matrix and remove probes with any missing values
+mtx_imp <- assay(beta_SE_imputed)
+mtx_imp <- mtx_imp[names(which(round(100*rowSums(is.na(mtx_imp))/ncol(mtx_imp),3) == 0)),]
+
+# Load TCGA clinical data using UCSC Xena Tools
+library(UCSCXenaTools)
+data(XenaData)
+xena <- XenaData
+
+# Filter for GBM clinical data
+gbm_meta <- xena %>% filter(grepl("GBM", XenaCohorts, ignore.case=TRUE) &
+                            grepl("clinicalMatrix", XenaDatasets, ignore.case=TRUE))
+
+hub_url  <- gbm_meta$XenaHosts[2]
+dataset  <- gbm_meta$XenaDatasets[2]
+
+# Download and prepare clinical data
+xquery <- XenaGenerate(subset = XenaCohorts == "TCGA Glioblastoma (GBM)") %>% 
+  XenaFilter(filterDatasets = "clinical")
+XenaQuery(xquery) %>%
+  XenaDownload(destdir = "/mnt/raid61/public_data/GBM_public_dataset/TCGA/xena_gbm") -> xe_download
+cli = XenaPrepare(xe_download)
+
+# Match clinical data with methylation samples
+sub_cli <- cli[match(colnames(mtx), cli$bcr_patient_barcode),]
+
+## Integrate BNI and TCGA Data
+
+# Extract probe names from BNI data
+betas$probe <- sapply(strsplit(rownames(betas), split = '_'), '[[', 1)
+
+# Find common probes between BNI and TCGA datasets
+inter_probe <- intersect(unique(betas$probe), rownames(mtx_imp))
+
+# Subset matrices to common probes
+tcga_mtx_f <- mtx_imp[inter_probe,]
+betas_f <- betas[betas$probe %in% inter_probe,] %>% distinct(probe,.keep_all = T)
+rownames(betas_f) <- NULL
+betas_f <- betas_f %>% column_to_rownames('probe')
+
+# Combine TCGA and BNI data
+new_mtx <- cbind(tcga_mtx_f, betas_f)
+
+corrected_data <- ComBat(dat = as.matrix(new_mtx), 
+                         batch = c(rep('b1',138),rep('b2',2)),
+                         par.prior = TRUE, 
+                         prior.plots = FALSE)
+
+var_probes <- apply(corrected_data, 1, var, na.rm = TRUE)
+top_probes <- names(sort(var_probes, decreasing = TRUE))[1:1503]
+
+beta_top_new <- corrected_data[top_probes, ]
+metas <- sub_cli[match(colnames(beta_top_new), sub_cli$bcr_patient_barcode), c('bcr_patient_barcode',
+                                                                               'G_CIMP_STATUS',
+                                                                               'GeneExp_Subtype')]
+metas$bcr_patient_barcode[139:140] <- c("BNI23","BNI21")
+
+results2 <- ConsensusClusterPlus(
+  as.matrix(beta_top_new),
+  maxK = 12,
+  reps = 1000,
+  pItem = 0.8,
+  pFeature = 1,
+  clusterAlg = "hc",
+  distance = "euclidean",
+  seed = 12345,
+  plot = "pdf"
+)
+
+pca2 <- prcomp(t(beta_top_new), scale. = TRUE)
+ggbiplot::ggbiplot(
+  pca2,
+  obs.scale = 1,
+  var.scale = 1,groups = as.character(results2[[3]]$consensusClass),
+  ellipse = TRUE,
+  var.axes = F,
+  point.size = 1
+) + geom_text(aes(label = colnames(beta_top_new)))
+
+
+breaks_list <- seq(-2, 2, by = 0.1)
+results2[[3]]$consensusMatrix -> mtxs
+colnames(mtxs) <- results2[[3]]$consensusClass %>% names()
+rownames(mtxs) <- results2[[3]]$consensusClass %>% names()
+mtxs <- mtxs[results2[[3]]$consensusTree$order,results2[[3]]$consensusTree$order]
+metas <- metas[match(colnames(mtxs), metas$bcr_patient_barcode),]
+
+
+
+df <- results2[[3]]$consensusClass %>% as.data.frame() %>% setNames('cluster') %>% arrange(cluster)
+metas$cluster <- df[match(metas$bcr_patient_barcode, rownames(df)),'cluster'] %>% as.factor()
+metas$batch <- ifelse(metas$bcr_patient_barcode %in% c("BNI21","BNI23"),'house','public')
+metas$batch[which(metas$bcr_patient_barcode %in% c("BNI21","BNI23"))] <- c("BNI21","BNI23")
+
+library(ComplexHeatmap)
+
+ComplexHeatmap::Heatmap(
+  matrix = mtxs,
+  cluster_rows = F,
+  cluster_columns = F,show_row_names = F, show_column_names = F,
+  column_title_gp = grid::gpar(fill = rainbow(5)[4:5],alpha = 0.5),
+  top_annotation = HeatmapAnnotation(
+    G_CIMP_STATUS = metas$G_CIMP_STATUS,
+    GeneExp_Subtype = metas$GeneExp_Subtype,
+    cluster = metas$cluster,
+    batch = metas$batch,
+    col = list(
+      G_CIMP_STATUS = c('G-CIMP' = '#eb746a', 'NON G-CIMP' = '#619cff'),
+      GeneExp_Subtype = c(
+        "Proneural" = '#ee0041',
+        "Neural" = '#fcd600',
+        "Mesenchymal" = '#00d17f',
+        "Classical" = '#0070aa'
+      ),
+      cluster = c(
+        '1' = '#ef4521',
+        '2' = '#f5d601',
+        '3' = '#0d9ba9'
+      ),
+      batch = c(
+        'BNI23' = '#eb746a',
+        'BNI21' = '#00bf68',
+        'public' = '#619cff'
+      )
+    )
+  )
+)
+
+save(results2, metas,mtxs, file = '/mnt/raid62/pzz/ding/935k/cluster.Rdata')
+
+```
