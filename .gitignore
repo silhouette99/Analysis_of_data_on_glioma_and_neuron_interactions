@@ -1,0 +1,31 @@
+# 临时文件
+*.tmp
+*.log
+.DS_Store
+.Rhistory
+.Rproj.user/
+*.Rproj
+
+# 大型二进制文件（除了我们要用LFS跟踪的）
+*.pdf
+*.zip
+*.tar.gz
+
+# 其他数据格式（除非明确要提交）
+*.csv
+*.tsv
+*.xlsx
+
+# 系统文件
+Thumbs.db
+._*
+
+# 缓存和构建文件
+__pycache__/
+*.pyc
+*.o
+*.so
+
+# 环境文件
+.Renviron
+.env
