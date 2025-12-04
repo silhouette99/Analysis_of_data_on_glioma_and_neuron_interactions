@@ -9,3 +9,5 @@ All key analysis scripts are available in the [/code](https://github.com/silhoue
 
 The definition and identification workflow for spiking cells described in Curry et al. is implemented using tools provided in the SCRAM framework, which is available at the following resource:
 [https://github.com/akdess/scram](https://github.com/akdess/scram)
+
+This repository also upload to Code Ocean[https://codeocean.com/capsule/1551747/tree](https://codeocean.com/capsule/1551747/tree).
