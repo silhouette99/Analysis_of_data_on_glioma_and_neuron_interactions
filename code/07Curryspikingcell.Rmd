@@ -336,10 +336,19 @@ source('/mnt/raid62/pzz/always_func/volcano_personal.R')
 
 
 ## Anno
-obj@meta.data[grepl(pattern = 'OPC.*tumor|tumor.*OPC|OPC.*GSC|GSC*OPC|oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation)  &
-                grepl(pattern = 'GABA.*tumor|tumor.*GABA|GABA.*GSC|GSC*GABA', obj@meta.data$cellclass_annotation), 'Annotation'] <-
-  obj@meta.data$cellclass_annotation[grepl(pattern = 'OPC.*tumor|tumor.*OPC|OPC.*GSC|GSC*OPC|oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation) &
-                                       grepl(pattern = 'GABA.*tumor|tumor.*GABA|GABA.*GSC|GSC*GABA', obj@meta.data$cellclass_annotation)]
+hc <- with(
+  obj@meta.data,
+  isTumor == "tumor" &
+    grepl("GABA", cellclass_annotation) &
+    (
+      grepl("OPC", cellclass_annotation) |
+        grepl("oligodendrocyte precursor", cellclass_annotation)
+    )
+)
+stopifnot(!anyNA(hc))
+  
+obj@meta.data$Annotation <- ifelse(hc, obj@meta.data$cellclass_annotation, NA_character_)
+obj@meta.data$group <- ifelse(hc, "HC", "other")  
 # obj@meta.data[grepl(pattern = 'oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation), 'Annotation'] <-
 #   obj@meta.data$cellclass_annotation[grepl(pattern = 'oligodendrocyte precursor.*tumor|tumor.*oligodendrocyte precursor|oligodendrocyte precursor.*GSC|GSC*oligodendrocyte precursor', obj@meta.data$cellclass_annotation)]
 
@@ -348,12 +357,13 @@ wt <- obj[,which(obj@meta.data$type == 'IDHwt')]
 
 source('/mnt/raid62/pzz/always_func/Vlnplot.R')
 
-mut@meta.data[which(!is.na(mut@meta.data$Annotation)),'group'] <- 'HC'
-mut@meta.data[which(is.na(mut@meta.data$Annotation)),'group'] <- 'other'
-wt@meta.data[which(!is.na(wt@meta.data$Annotation)),'group'] <- 'HC'
-wt@meta.data[which(is.na(wt@meta.data$Annotation)),'group'] <- 'other'
+# mut@meta.data[which(!is.na(mut@meta.data$Annotation)),'group'] <- 'HC'
+# mut@meta.data[which(is.na(mut@meta.data$Annotation)),'group'] <- 'other'
+# wt@meta.data[which(!is.na(wt@meta.data$Annotation)),'group'] <- 'HC'
+# wt@meta.data[which(is.na(wt@meta.data$Annotation)),'group'] <- 'other'
 
 individual_vln(mut, features = 'C1QL1', group = 'group',  my_comparation = list(c('HC','other')),layer = 'data', ylims = 5)|individual_vln(wt, features = 'C1QL1', group = 'group',  my_comparation = list(c('HC','other')),layer = 'data', ylims = 6)
+
 
 
 deg2 <-
