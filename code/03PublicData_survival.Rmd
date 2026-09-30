@@ -265,16 +265,21 @@ ggsurvplot(
 
 ## GLASS Tumor recurrence interval & Survival period after recurrence
 ```{r}
+library(openxlsx)
 library(data.table)
+library(readr)
+library(tibble)
 library(dplyr)
+library(ggplot2)
+library(ggpubr)
 library(survival)
 library(survminer)
-library(ggplot2)
+library(patchwork)
 
 # Load clinical metadata
 meta <- read.xlsx('/mnt/raid62/pzz/ding/GLASS_clinal_new.xlsx')
 df <- meta[meta$Initial.Tumor.Histology == 'Glioblastoma' & 
-           meta$IDHcodel.subtype == "IDHwt_noncodel", ]
+             meta$IDHcodel.subtype == "IDHwt_noncodel", ]
 
 # Load and process expression matrix
 mtx <- fread("/mnt/raid61/public_data/GBM_public_dataset/GLASS/gene_tpm_matrix_all_samples.tsv")
@@ -286,7 +291,7 @@ colnames(mtx) <- gsub('\\.', '-', colnames(mtx))
 all_meta <- read_csv('/mnt/raid62/pzz/GLSS/meta/Job-2134726913294944750552992782.csv')
 clinal <- read_csv("/mnt/raid62/pzz/GLSS/Job-3968149415267597282451676377.csv") 
 clinal <- clinal[clinal$idh_codel_subtype == 'IDHwt' & 
-                grepl('-TP|-R1', clinal$sample_barcode), ]
+                   grepl('-TP|-R1', clinal$sample_barcode), ]
 
 # Match sample IDs with expression matrix
 file_df <- data.frame(
@@ -296,20 +301,22 @@ file_df <- data.frame(
 file_df <- file_df[!duplicated(file_df$case.barcode), ]
 clinal$file <- file_df$file[match(clinal$sample_barcode, file_df$case.barcode)]
 
-# Add gene expression values
+
+# Merge clinical data
 mtx <- log10(mtx + 1)
+clinal <- clinal %>%
+  filter(histology == 'Glioblastoma') %>%
+  left_join(all_meta %>% select(case_barcode, case_vital_status, case_overall_survival_mo),
+            by = "case_barcode")
+
+# Add gene expression values
 clinal <- clinal %>%
   mutate(gene_expr = mtx['C1QL1', match(clinal$file, colnames(mtx))]) %>% as.data.frame()
 
-# Merge clinical data
-clinal <- merge(clinal, 
-               all_meta[, c("case_barcode", "case_vital_status", "case_overall_survival_mo")],
-               by = "case_barcode")
-clinal <- clinal[clinal$histology == 'Glioblastoma', ]
 
-# Prepare analysis datasets
 re_clinal <- clinal[grepl('-R1', clinal$sample_barcode) & !is.na(clinal$gene_expr), ]
 pr_clinal <- clinal[grepl('-TP', clinal$sample_barcode) & !is.na(clinal$gene_expr), ]
+
 
 # Merge back to original metadata
 meta$primary_C1QL1 <- pr_clinal$gene_expr[match(meta$Case.barcode, pr_clinal$case_barcode)]
