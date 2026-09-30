@@ -11,6 +11,13 @@ output:
 
 
 ```{r}
+
+# if (!require("devtools")) {
+#   install.packages("devtools")
+# }
+# devtools::install_github("akdess/scram", dependencies = TRUE, build_vignettes = FALSE)
+# devtools::install_github("akdess/casper_0.2.0", dependencies = TRUE, build_vignettes = FALSE)
+
 library(scramv2)
 library(Seurat)
 library(harmony)
