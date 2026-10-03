@@ -303,6 +303,8 @@ dat@meta.data[which(dat@meta.data$sample %in% c("OG-02_CO"  ,"OG-03_LE" , "OG-03
 
 DimPlot(dat,label = T,split.by = 'type')
 
+## Selection of clusters with chr1p deletion and chr7p amplification may introduce bias.
+## Selection should be based on the actual clustering results.
 obj <-
   dat[, which(dat@meta.data$harmony_clusters %in% c(4,18,14,24,12,35,19,15,10,17,28,29))]
 
