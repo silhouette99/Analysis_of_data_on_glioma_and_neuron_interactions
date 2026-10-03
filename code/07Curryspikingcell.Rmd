@@ -18,6 +18,9 @@ output:
 # devtools::install_github("akdess/scram", dependencies = TRUE, build_vignettes = FALSE)
 # devtools::install_github("akdess/casper_0.2.0", dependencies = TRUE, build_vignettes = FALSE)
 
+# ----------------------------------------------------------------------------
+# 0. Libraries and helpers
+# ----------------------------------------------------------------------------
 library(scramv2)
 library(Seurat)
 library(harmony)
@@ -25,143 +28,246 @@ library(SeuratDisk)
 library(purrr)
 library(ggplot2)
 library(ggpubr)
-
+library(hdf5r)
 
 source('/mnt/raid62/pzz/always_func/read10x_file.R')
 
 setwd('/mnt/raid61/public_data/Curry_etal_2024_CancerCell/')
 
+# ----------------------------------------------------------------------------
+# 1. Load per-sample 10x matrices and merge
+#    For each sample ID, locate the matching barcode/gene/mtx files in the
+#    working directory, build a Seurat object, and tag cells with 'sample'.
+# ----------------------------------------------------------------------------
 # Define sample IDs
-sample_ids <- c('OG-02_CO', 'OG-03_LE', 'OG-03_CO', 
-                'GBM-05_LE', 'GBM-06_CO', 'GBM-07_CO')
-
-# Function to read and process individual samples
-read_sample <- function(sample_id) {
-  tryCatch({
-    # Find matching files
-    files <- grep(pattern = sample_id, dir(), value = TRUE)
-    if (length(files) < 3) {
-      stop(paste("Incomplete files for sample:", sample_id))
-    }
-    
-    # Read 10X data
-    obj <- Read10X_files(
-      barcode = files[1],
-      gene = files[2], 
-      mtx = files[3]
-    )
-    
-    # Create Seurat object and add metadata
+obj_list <-
+  lapply(c(
+    'OG-02_CO',
+    'OG-03_LE',
+    'OG-03_CO',
+    'GBM-05_LE',
+    'GBM-06_CO',
+    'GBM-07_CO'
+  ), function(x) {
+    file <- grep(pattern = x, dir(), value = T)
+    obj <-
+      Read10X_files(barcode = file[1],
+                    gene = file[2],
+                    mtx = file[3])
     obj <- CreateSeuratObject(obj)
-    obj$sample <- sample_id
-    obj$sample_id <- sample_id  # Redundant but clearer
-    
-    return(obj)
-  }, error = function(e) {
-    warning(paste("Failed to process sample", sample_id, ":", e$message))
-    return(NULL)
+    obj@meta.data$sample <- x
+    obj
   })
+
+dat <- Reduce(merge, obj_list)
+
+
+## 2. QC filtering
+dat[['percent.mt']] <- PercentageFeatureSet(dat, pattern = 'MT-')
+dat <-
+  dat[, which(
+    dat@meta.data$nFeature_RNA > 200 &
+      dat@meta.data$nFeature_RNA < 5000 &
+      dat@meta.data$percent.mt < 10
+  )]
+
+
+
+## 3. Standard preprocessing: normalize, HVGs, scaling, PCA
+
+dat <- NormalizeData(dat)
+dat <- FindVariableFeatures(dat)
+dat <- ScaleData(dat, features = VariableFeatures(dat))
+
+dat <- RunPCA(dat, npcs = 100, features = VariableFeatures(dat))
+
+
+## 4. Un-integrated clustering on PCA (pre-harmony sanity check)
+
+dat <- FindNeighbors(dat, dims = 1:40, verbose = F)
+dat <-
+  FindClusters(
+    dat,
+    resolution = 0.8,
+    # dims.use = 1:20,
+    dims.use = 1:40,
+    print.output = F
+  )
+
+
+dat <- RunUMAP(dat,
+               reduction = "pca",
+               # dims = 1:20,
+               dims = 1:40,
+               verbose = F)
+
+
+library(harmony)
+
+
+
+## 5. Harmony integration on 'sample', then re-cluster and re-embed
+dat <-
+  RunHarmony(
+    dat,
+    group.by.vars = 'sample',
+    dims.use = 1:50,
+    plot_convergence = F,
+    max.iter.cluster = 100,
+    nclust = 100
+  )
+
+# Cluster and UMAP on the harmony-corrected embedding
+dat <-
+  FindNeighbors(dat,
+                # dims = 1:20,
+                dims = 1:20,
+                verbose = F,
+                reduction = "harmony",)
+dat <-
+  FindClusters(
+    dat,
+    cluster.name = 'harmony_clusters',
+    reduction = "harmony",
+    resolution = 1.5,
+    # dims.use = 1:20,
+    dims.use = 1:20,
+    print.output = F
+  ) %>% RunUMAP(reduction = "harmony",
+                # dims = 1:20,
+                dims = 1:40,
+                reduction.name = "harmony_umap")
+
+# ----------------------------------------------------------------------------
+# 6. Helper: pure-R Seurat -> h5ad writer
+#    Replaces SeuratDisk::SaveH5Seurat() + Convert(), which fail on Seurat v5
+#    (v5 layers layout vs v3 assays/RNA/data, and hard-deprecated Assay
+#    accessors in SeuratObject 5.3).
+#
+#    Writes a standard AnnData h5ad:
+#      X      = <layer> matrix (default: raw counts) as cells x genes CSR
+#      obs    = obj@meta.data
+#      var    = empty dataframe indexed by gene symbols
+# ----------------------------------------------------------------------------
+WriteH5AD <- function(obj, file, assay = "RNA", layer = "counts") {
+  obj <- tryCatch(JoinLayers(obj), error = function(e) obj)
+  m <- GetAssayData(obj, assay = assay, layer = layer)
+  stopifnot(inherits(m, "dgCMatrix"))
+  stopifnot(is.integer(m@p))  # nnz < 2^31, ensures indptr fits in int32/int64
+
+  cells <- colnames(m)
+  genes <- rownames(m)
+  meta <- obj@meta.data[cells, , drop = FALSE]
+  cols <- colnames(meta)
+
+  # anndata uses '/' as the group separator in HDF5, so column names with '/'
+  # cannot be mapped to .obs columns
+  if (any(grepl("/", cols, fixed = TRUE)))
+    stop("meta.data column names contain '/', cannot write h5ad: ",
+         paste(cols[grepl("/", cols, fixed = TRUE)], collapse = ", "))
+
+  if (file.exists(file)) unlink(file)
+  message("Writing ", file, " (", length(genes), " genes x ", length(cells),
+          " cells, nnz = ", length(m@x), ") ...")
+
+  # Small helpers to attach the encoding attributes anndata expects
+  f <- H5File$new(file, "w")
+  strdt <- f$create_dataset("__tmp__", "a")$get_type()$copy()
+  strdt$set_cset("UTF-8")  # so anndata decodes the strings as str
+  f$link_delete("__tmp__")
+  scalar <- H5S$new(type = "scalar")
+  add_attr <- function(loc, name, val)
+    loc$create_attr(name, robj = val, dtype = strdt, space = scalar)
+  add_str_arr_attrs <- function(ds) {
+    add_attr(ds, "encoding-type",    "string-array")
+    add_attr(ds, "encoding-version", "0.2.0")
+    invisible(NULL)
+  }
+  add_array_attrs <- function(ds) {
+    add_attr(ds, "encoding-type",    "array")
+    add_attr(ds, "encoding-version", "0.2.0")
+    invisible(NULL)
+  }
+
+  ## X: dgCMatrix is genes x cells (column-sparse), which is exactly the
+  ## cells x genes CSR layout used by anndata
+  X <- f$create_group("X")
+  X$create_dataset("data",    m@x, gzip = 4)  # float64
+  X$create_dataset("indices", m@i, gzip = 4)  # int32 (gene indices)
+  X$create_dataset("indptr",  m@p, gzip = 4)  # int32
+  add_attr(X, "encoding-type",    "csr_matrix")
+  add_attr(X, "encoding-version", "0.1.0")
+  X$create_attr("shape", robj = c(length(cells), length(genes)),
+                dtype = h5types$H5T_NATIVE_INT64)
+
+  ## var: gene-level dataframe (index only, no columns)
+  var <- f$create_group("var")
+  add_str_arr_attrs(var$create_dataset("_index", genes, gzip = 4))
+  add_attr(var, "encoding-type",    "dataframe")
+  add_attr(var, "encoding-version", "0.2.0")
+  add_attr(var, "_index",           "_index")
+  var$create_attr("column-order", robj = character(0), dtype = strdt)
+
+  ## obs: cell-level dataframe from meta.data, typed per column
+  obs <- f$create_group("obs")
+  for (cn in cols) {
+    v <- meta[[cn]]
+    if (is.integer(v)) {
+      add_array_attrs(obs$create_dataset(cn, v, gzip = 4))            # int32
+    } else if (is.numeric(v)) {
+      add_array_attrs(obs$create_dataset(cn, as.numeric(v), gzip = 4))# float64
+    } else {
+      v <- as.character(v)
+      v[is.na(v)] <- ""
+      add_str_arr_attrs(obs$create_dataset(cn, v, gzip = 4))    # string
+    }
+  }
+  add_str_arr_attrs(obs$create_dataset("_index", cells, gzip = 4))
+  add_attr(obs, "encoding-type",    "dataframe")
+  add_attr(obs, "encoding-version", "0.2.0")
+  add_attr(obs, "_index",           "_index")
+  obs$create_attr("column-order", robj = cols, dtype = strdt)
+
+  ## Root attributes (match files written by official anndata)
+  add_attr(f, "encoding-type",    "anndata")
+  add_attr(f, "encoding-version", "0.1.0")
+  f$close_all()
+  message("Done.")
+  invisible(file)
 }
 
-# Read all samples with progress indication
-message("Reading sample data...")
-obj_list <- map(sample_ids, read_sample)
 
-# Remove failed samples
-obj_list <- obj_list[!sapply(obj_list, is.null)]
-if (length(obj_list) == 0) stop("No samples were successfully loaded")
-
-# Merge all samples
-message("Merging samples...")
-dat <- merge(obj_list[[1]], obj_list[-1])
-
-# Clean up to save memory
-rm(obj_list)
-gc()
-
-# Quality control
-message("Performing quality control...")
-dat$percent.mt <- PercentageFeatureSet(dat, pattern = '^MT-')
-
-qc_cells <- which(
-  dat$nFeature_RNA > 200 &
-    dat$nFeature_RNA < 5000 &
-    dat$percent.mt < 10
-)
-
-if (length(qc_cells) == 0) stop("No cells passed quality control")
-
-dat <- dat[, qc_cells]
-
-# Standard preprocessing
-message("Preprocessing data...")
-dat <- NormalizeData(dat, verbose = FALSE)
-dat <- FindVariableFeatures(dat, selection.method = "vst", nfeatures = 2000, verbose = FALSE)
-dat <- ScaleData(dat, features = VariableFeatures(dat), verbose = FALSE)
-
-# PCA
-message("Running PCA...")
-dat <- RunPCA(dat, 
-              npcs = 50, 
-              features = VariableFeatures(dat),
-              verbose = FALSE)
-
-# Harmony integration
-message("Running Harmony integration...")
-dat <- RunHarmony(
-  dat,
-  group.by.vars = 'sample',
-  dims.use = 1:50,
-  plot_convergence = FALSE,
-  max.iter.cluster = 100,
-  nclust = 100,
-  verbose = FALSE
-)
-
-# Clustering and UMAP
-message("Performing clustering...")
-dat <- FindNeighbors(
-  dat,
-  reduction = "harmony",
-  dims = 1:20,
-  verbose = FALSE
-)
-
-dat <- FindClusters(
-  dat,
-  reduction = "harmony",
-  resolution = 1.5,
-  verbose = FALSE
-)
-
-message("Running UMAP...")
-dat <- RunUMAP(
-  dat,
-  reduction = "harmony",
-  dims = 1:40,
-  reduction.name = "harmony_umap",
-  verbose = FALSE
-)
-
-# Prepare object for export
-message("Preparing data for export...")
+## 7. Export: rebuild a clean object from counts + meta.data, then write h5ad
 meta <- dat@meta.data
 dat <- JoinLayers(dat)
-mtx <- GetAssayData(dat, layer = 'counts')
-
-# Create new object with counts and metadata
+mtx <- GetAssayData(dat, assay = "RNA", layer = "counts")
 obj <- CreateSeuratObject(mtx, meta.data = meta)
 
-# Ensure directory exists
-if (!dir.exists('out')) dir.create('out', recursive = TRUE)
+if (!dir.exists("out")) dir.create("out", recursive = TRUE)
 
-# Save in multiple formats
-message("Saving data...")
-SaveH5Seurat(obj, filename = 'out/adata.h5Seurat', overwrite = TRUE)
-Convert('out/adata.h5Seurat', dest = "h5ad", overwrite = TRUE)
-saveRDS(dat, file = 'out/seurat_obj.Rds')
+# Write the standard h5ad directly (replaces SaveH5Seurat() + Convert())
+WriteH5AD(obj, file = "out/adata.h5ad", layer = "counts")
 
-message("Processing completed successfully!")
+if (!file.exists("seurat_obj.Rds"))
+  saveRDS(dat, "seurat_obj.Rds")
+
+
+## 8. Integrity check of the written h5ad
+h5 <- H5File$new("out/adata.h5ad", "r")
+stopifnot(
+  identical(h5[["X"]]$attr_open("shape")$read(), c(ncol(mtx), nrow(mtx))),
+  length(h5[["X/data"]][]) == length(mtx@x),
+  identical(h5[["var/_index"]][], rownames(mtx)),
+  identical(h5[["obs/_index"]][], colnames(mtx))
+)
+h5$close_all()
+
+message("\nFinished successfully! Output files:")
+message("  - ", normalizePath("out/adata.h5ad"))
+message("  - ", normalizePath("seurat_obj.Rds"))
+message("\nSubsequent neural network classification (run in a python environment with scanpy/tensorflow):")
+message("  cd out && python3 nn_classifier_pretrained.py 041524_glioma ./adata.h5ad --s --normalize_test")
+
 
 
 ```
