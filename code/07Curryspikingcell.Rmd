@@ -423,7 +423,7 @@ obj <-
 obj <- RunUMAP(obj, features = rownames(obj),n.neighbors = 40)
 obj <- RunTSNE(obj, features = rownames(obj))
 
-# 构建邻居关系并进行聚类
+# Cluster with multi-scoring
 obj <- FindNeighbors(obj , features = rownames(obj),verbose = F,graph.name = 'RNA_snn2')
 obj <- FindClusters(obj,resolution = 0.5,verbose = F,graph.name = 'RNA_snn2')
 
